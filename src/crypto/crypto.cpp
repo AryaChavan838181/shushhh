@@ -411,7 +411,83 @@ void secure_wipe(void* ptr, size_t len) {
 }
 
 // ============================================================
-// FullCryptoTest — validates all Phase 0 crypto operations
+// Phase 1 · SHA-256 hashing
+// ============================================================
+
+std::vector<unsigned char> sha256_hash(
+    const unsigned char* data, size_t data_len
+) {
+    std::vector<unsigned char> hash(crypto_hash_sha256_BYTES); // 32 bytes
+    crypto_hash_sha256(hash.data(), data, data_len);
+    return hash;
+}
+
+std::vector<unsigned char> sha256_hash(const std::string& data) {
+    return sha256_hash(
+        reinterpret_cast<const unsigned char*>(data.data()),
+        data.size()
+    );
+}
+
+// ============================================================
+// Phase 1 · Ed25519 signatures (F-09)
+// ============================================================
+
+SigningKeyPair generate_ed25519_keypair() {
+    SigningKeyPair kp;
+    crypto_sign_ed25519_keypair(kp.public_key, kp.private_key);
+    return kp;
+}
+
+std::vector<unsigned char> ed25519_sign_detached(
+    const unsigned char* message, size_t message_len,
+    const unsigned char* private_key
+) {
+    std::vector<unsigned char> sig(crypto_sign_ed25519_BYTES); // 64 bytes
+    unsigned long long sig_len = 0;
+
+    if (crypto_sign_ed25519_detached(sig.data(), &sig_len,
+                                     message, message_len,
+                                     private_key) != 0) {
+        std::cerr << "[-] Ed25519 signing failed\n";
+        return {};
+    }
+
+    sig.resize(sig_len);
+    return sig;
+}
+
+bool ed25519_verify_detached(
+    const unsigned char* signature,
+    const unsigned char* message, size_t message_len,
+    const unsigned char* public_key
+) {
+    return crypto_sign_ed25519_verify_detached(
+        signature, message, message_len, public_key
+    ) == 0;
+}
+
+// ============================================================
+// Phase 1 · Recipient tag (F-10 relay routing)
+// ============================================================
+
+std::string compute_recipient_tag(const unsigned char* public_key) {
+    auto hash = sha256_hash(public_key, 32);
+
+    // Convert to hex string for use as the relay routing tag
+    std::string tag;
+    tag.reserve(64);
+    for (unsigned char byte : hash) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", byte);
+        tag.append(buf, 2);
+    }
+
+    return tag;
+}
+
+// ============================================================
+// FullCryptoTest — validates all crypto operations
 // ============================================================
 
 void FullCryptoTest() {
@@ -466,9 +542,13 @@ void FullCryptoTest() {
         }
 
         // Test tamper detection — flip one byte in ciphertext
+        // Temporarily suppress stderr: decrypt_message will print an error,
+        // but that error is the *expected* outcome of this test
         if (!enc.ciphertext.empty()) {
             enc.ciphertext[0] ^= 0x01;
+            std::streambuf* orig_cerr = std::cerr.rdbuf(nullptr); // mute stderr
             std::string tampered = decrypt_message(enc, test_key);
+            std::cerr.rdbuf(orig_cerr); // restore stderr
             if (tampered.empty()) {
                 std::cout << "    [+] PASS: tampered ciphertext correctly rejected\n";
             } else {
@@ -592,6 +672,93 @@ void FullCryptoTest() {
         }
 
         secure_wipe(test_key, 32);
+    }
+
+    // --- Test 6: SHA-256 consistency ---
+    std::cout << "[*] Test 6: SHA-256 consistency\n";
+    {
+        auto hash1 = sha256_hash("test input");
+        auto hash2 = sha256_hash("test input");
+        auto hash3 = sha256_hash("different input");
+
+        if (hash1.size() == 32 && sodium_memcmp(hash1.data(), hash2.data(), 32) == 0) {
+            std::cout << "    [+] PASS: same input produces same hash\n";
+        } else {
+            std::cerr << "    [-] FAIL: SHA-256 not consistent\n";
+            all_passed = false;
+        }
+
+        if (sodium_memcmp(hash1.data(), hash3.data(), 32) != 0) {
+            std::cout << "    [+] PASS: different input produces different hash\n";
+        } else {
+            std::cerr << "    [-] FAIL: SHA-256 collision on trivial inputs\n";
+            all_passed = false;
+        }
+    }
+
+    // --- Test 7: Ed25519 sign/verify roundtrip ---
+    std::cout << "[*] Test 7: Ed25519 sign/verify roundtrip\n";
+    {
+        SigningKeyPair kp = generate_ed25519_keypair();
+        std::string message = "shushhh server auth response test";
+
+        auto sig = ed25519_sign_detached(
+            reinterpret_cast<const unsigned char*>(message.data()),
+            message.size(),
+            kp.private_key
+        );
+
+        if (!sig.empty()) {
+            bool valid = ed25519_verify_detached(
+                sig.data(),
+                reinterpret_cast<const unsigned char*>(message.data()),
+                message.size(),
+                kp.public_key
+            );
+            if (valid) {
+                std::cout << "    [+] PASS: valid signature verified\n";
+            } else {
+                std::cerr << "    [-] FAIL: valid signature rejected\n";
+                all_passed = false;
+            }
+
+            // Tamper with message — should reject
+            std::string tampered = "tampered server auth response test";
+            bool invalid = ed25519_verify_detached(
+                sig.data(),
+                reinterpret_cast<const unsigned char*>(tampered.data()),
+                tampered.size(),
+                kp.public_key
+            );
+            if (!invalid) {
+                std::cout << "    [+] PASS: tampered message correctly rejected\n";
+            } else {
+                std::cerr << "    [-] FAIL: tampered message was not rejected\n";
+                all_passed = false;
+            }
+        } else {
+            std::cerr << "    [-] FAIL: signing returned empty\n";
+            all_passed = false;
+        }
+
+        secure_wipe(kp.private_key, 64);
+    }
+
+    // --- Test 8: Recipient tag computation ---
+    std::cout << "[*] Test 8: Recipient tag computation\n";
+    {
+        unsigned char pub[32];
+        randombytes_buf(pub, 32);
+
+        std::string tag1 = compute_recipient_tag(pub);
+        std::string tag2 = compute_recipient_tag(pub);
+
+        if (tag1.size() == 64 && tag1 == tag2) {
+            std::cout << "    [+] PASS: tag is 64 hex chars and deterministic\n";
+        } else {
+            std::cerr << "    [-] FAIL: tag computation inconsistent\n";
+            all_passed = false;
+        }
     }
 
     // --- Summary ---

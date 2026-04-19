@@ -124,6 +124,55 @@ EncryptedMessage json_to_encrypted(const std::string& json_str);
 void secure_wipe(void* ptr, size_t len);
 
 // ============================================================
+// Phase 1 · SHA-256 hashing
+// ============================================================
+
+// Compute SHA-256 hash of arbitrary data. Used for:
+// - Credential hashing: SHA-256(password + username)
+// - Recipient routing tags: SHA-256(public_key)
+std::vector<unsigned char> sha256_hash(
+    const unsigned char* data, size_t data_len
+);
+
+// Convenience overload for string input.
+std::vector<unsigned char> sha256_hash(const std::string& data);
+
+// ============================================================
+// Phase 1 · Ed25519 signatures (F-09)
+// ============================================================
+
+// Ed25519 signing keypair (separate from X25519 — different curves)
+struct SigningKeyPair {
+    unsigned char private_key[64];   // crypto_sign_ed25519 secret key is 64 bytes
+    unsigned char public_key[32];
+};
+
+// Generate a fresh Ed25519 signing keypair.
+SigningKeyPair generate_ed25519_keypair();
+
+// Create a detached Ed25519 signature over a message.
+std::vector<unsigned char> ed25519_sign_detached(
+    const unsigned char* message, size_t message_len,
+    const unsigned char* private_key
+);
+
+// Verify a detached Ed25519 signature.
+// Returns true if the signature is valid.
+bool ed25519_verify_detached(
+    const unsigned char* signature,
+    const unsigned char* message, size_t message_len,
+    const unsigned char* public_key
+);
+
+// ============================================================
+// Phase 1 · Recipient tag (F-10 relay routing)
+// ============================================================
+
+// Compute SHA-256(public_key) — used as the delivery tag on the relay.
+// The relay never sees real identities, only this hash.
+std::string compute_recipient_tag(const unsigned char* public_key);
+
+// ============================================================
 // Testing
 // ============================================================
 
@@ -133,4 +182,6 @@ void secure_wipe(void* ptr, size_t len);
 // - HKDF determinism
 // - Session encrypt / decrypt roundtrip
 // - JSON serialization roundtrip
+// - SHA-256 consistency (Phase 1)
+// - Ed25519 sign/verify roundtrip (Phase 1)
 void FullCryptoTest();

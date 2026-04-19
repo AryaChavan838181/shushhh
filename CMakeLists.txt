@@ -21,6 +21,8 @@ find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(shushhh
     Main.cpp
     src/crypto/crypto.cpp
+    src/auth/auth.cpp
+    src/watchdog/watchdog.cpp
 )
 
 target_include_directories(shushhh PRIVATE
