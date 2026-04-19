@@ -16,6 +16,7 @@ endif()
 find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(liboqs CONFIG REQUIRED)
 
 # --- Sources ---
 add_executable(shushhh
@@ -34,6 +35,7 @@ target_link_libraries(shushhh PRIVATE
     unofficial-sodium::sodium
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    OQS::oqs
 )
 
 # --- Windows-specific: static link system libs ---

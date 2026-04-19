@@ -37,6 +37,11 @@ C:/vcpkg/installed/x64-windows-static/share/curl/CURLTargets-debug.cmake
 C:/vcpkg/installed/x64-windows-static/share/curl/CURLTargets-release.cmake
 C:/vcpkg/installed/x64-windows-static/share/curl/CURLTargets.cmake
 C:/vcpkg/installed/x64-windows-static/share/curl/vcpkg-cmake-wrapper.cmake
+C:/vcpkg/installed/x64-windows-static/share/liboqs/liboqsConfig.cmake
+C:/vcpkg/installed/x64-windows-static/share/liboqs/liboqsConfigVersion.cmake
+C:/vcpkg/installed/x64-windows-static/share/liboqs/liboqsTargets-debug.cmake
+C:/vcpkg/installed/x64-windows-static/share/liboqs/liboqsTargets-release.cmake
+C:/vcpkg/installed/x64-windows-static/share/liboqs/liboqsTargets.cmake
 C:/vcpkg/installed/x64-windows-static/share/nlohmann_json/nlohmann_jsonConfig.cmake
 C:/vcpkg/installed/x64-windows-static/share/nlohmann_json/nlohmann_jsonConfigVersion.cmake
 C:/vcpkg/installed/x64-windows-static/share/nlohmann_json/nlohmann_jsonTargets.cmake

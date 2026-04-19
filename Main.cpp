@@ -130,7 +130,7 @@ int main() {
     // ================================================================
     // Session state — persists across menu iterations
     // ================================================================
-    KeyPair my_keypair;
+    HybridKeyPair my_keypair;
     bool has_keypair = false;
 
     MessageSession session;
@@ -147,11 +147,16 @@ int main() {
 
         // -- Option 1: Generate keypair --
         case 1: {
-            my_keypair = generate_x25519_keypair();
+            my_keypair = generate_hybrid_keypair();
             has_keypair = true;
-            std::cout << "[+] Keypair generated\n";
-            std::cout << "    Public key: " << to_hex(my_keypair.public_key, 32) << "\n";
-            std::cout << "    Recipient tag: " << compute_recipient_tag(my_keypair.public_key) << "\n";
+            std::cout << "[+] Hybrid Keypair (X25519 + ML-KEM-768) generated\n";
+            std::cout << "    [X25519]: " << to_hex(my_keypair.x25519_public, 32) << "\n";
+            std::cout << "    [Kyber] : " << to_hex(my_keypair.kyber_public.data(), 16) << "... (" << my_keypair.kyber_public.size() << " bytes total)\n";
+            std::cout << "\n--- SHARE THIS ENTIRE STRING WITH YOUR PEER ---\n";
+            std::cout << to_hex(my_keypair.x25519_public, 32) 
+                      << to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size()) << "\n";
+            std::cout << "-----------------------------------------------\n";
+            std::cout << "    Recipient tag: " << compute_recipient_tag(my_keypair.x25519_public) << "\n";
             // Private key is NEVER displayed — security invariant
             break;
         }
@@ -163,20 +168,76 @@ int main() {
                 break;
             }
 
-            std::cout << "Enter peer's public key (64 hex chars): ";
-            std::string peer_hex;
-            std::getline(std::cin, peer_hex);
+            std::cout << "[?] Are you the (1) Initiator or (2) Responder? ";
+            int role;
+            std::cin >> role;
+            std::cin.ignore();
 
-            unsigned char their_pub[32];
-            if (!from_hex(peer_hex, their_pub, 32)) {
-                std::cerr << "[-] Invalid hex — must be exactly 64 hex characters\n";
-                break;
+            if (role == 1) {
+                // Initiator Flow
+                std::cout << "Enter peer's full hybrid public key (" << (32 + my_keypair.kyber_public.size()) * 2 << " hex chars):\n> ";
+                std::string peer_hex;
+                std::getline(std::cin, peer_hex);
+
+                size_t expected_len = (32 + my_keypair.kyber_public.size()) * 2;
+                if (peer_hex.size() != expected_len) {
+                    std::cerr << "[-] Invalid hex length — expected " << expected_len << " chars\n";
+                    break;
+                }
+
+                unsigned char their_x25519[32];
+                if (!from_hex(peer_hex.substr(0, 64), their_x25519, 32)) {
+                    std::cerr << "[-] Invalid hex in X25519 part\n";
+                    break;
+                }
+
+                std::vector<unsigned char> their_kyber(my_keypair.kyber_public.size());
+                if (!from_hex(peer_hex.substr(64), their_kyber.data(), their_kyber.size())) {
+                    std::cerr << "[-] Invalid hex in Kyber part\n";
+                    break;
+                }
+
+                std::vector<unsigned char> kyber_ciphertext;
+                session = create_session_initiator(my_keypair, their_x25519, their_kyber, kyber_ciphertext);
+                has_session = true;
+
+                std::cout << "\n--- SEND THIS ML-KEM-768 CIPHERTEXT TO THE RESPONDER ---\n";
+                std::cout << to_hex(kyber_ciphertext.data(), kyber_ciphertext.size()) << "\n";
+                std::cout << "----------------------------------------------------------\n";
+
+                secure_wipe(their_x25519, 32);
+                secure_wipe(their_kyber.data(), their_kyber.size());
+
+            } else if (role == 2) {
+                // Responder Flow
+                std::cout << "Enter initiator's short X25519 public key (64 hex chars):\n> ";
+                std::string init_x25519_hex;
+                std::getline(std::cin, init_x25519_hex);
+
+                unsigned char their_x25519[32];
+                if (init_x25519_hex.size() != 64 || !from_hex(init_x25519_hex, their_x25519, 32)) {
+                    std::cerr << "[-] Invalid X25519 hex\n";
+                    break;
+                }
+
+                std::cout << "Enter ML-KEM-768 ciphertext from initiator (" << 1088 * 2 << " hex chars):\n> ";
+                std::string ct_hex;
+                std::getline(std::cin, ct_hex);
+
+                std::vector<unsigned char> kyber_ct(1088); // ML-KEM-768 ciphertext is 1088 bytes
+                if (ct_hex.size() != 1088 * 2 || !from_hex(ct_hex, kyber_ct.data(), kyber_ct.size())) {
+                    std::cerr << "[-] Invalid ciphertext hex\n";
+                    break;
+                }
+
+                session = create_session_responder(my_keypair, their_x25519, kyber_ct);
+                has_session = true;
+
+                secure_wipe(their_x25519, 32);
+                secure_wipe(kyber_ct.data(), kyber_ct.size());
+            } else {
+                std::cerr << "[-] Invalid role\n";
             }
-
-            session = create_session(my_keypair, their_pub);
-            has_session = true;
-
-            secure_wipe(their_pub, 32);
             break;
         }
 
@@ -187,7 +248,7 @@ int main() {
                 break;
             }
 
-            std::cout << "Enter recipient's public key for routing (64 hex, or Enter to skip): ";
+            std::cout << "Enter recipient's X25519 public key for routing (64 hex, or Enter to skip): ";
             std::string recip_hex;
             std::getline(std::cin, recip_hex);
 
@@ -235,7 +296,7 @@ int main() {
                 break;
             }
 
-            std::string my_tag = compute_recipient_tag(my_keypair.public_key);
+            std::string my_tag = compute_recipient_tag(my_keypair.x25519_public);
             std::string url = server_url + "/fetch?tag=" + my_tag;
 
             std::cout << "[*] Fetching messages for tag: " << my_tag.substr(0, 16) << "...\n";
@@ -308,13 +369,18 @@ int main() {
 
             // Wipe all key material before exit
             if (has_keypair) {
-                secure_wipe(my_keypair.private_key, 32);
-                secure_wipe(my_keypair.public_key, 32);
+                secure_wipe(my_keypair.x25519_private, 32);
+                secure_wipe(my_keypair.x25519_public, 32);
+                secure_wipe(my_keypair.kyber_private.data(), my_keypair.kyber_private.size());
+                secure_wipe(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
             }
             if (has_session) {
-                secure_wipe(session.my_keypair.private_key, 32);
-                secure_wipe(session.my_keypair.public_key, 32);
-                secure_wipe(session.their_public_key, 32);
+                secure_wipe(session.my_keypair.x25519_private, 32);
+                secure_wipe(session.my_keypair.x25519_public, 32);
+                secure_wipe(session.my_keypair.kyber_private.data(), session.my_keypair.kyber_private.size());
+                secure_wipe(session.my_keypair.kyber_public.data(), session.my_keypair.kyber_public.size());
+                secure_wipe(session.their_x25519_public_key, 32);
+                secure_wipe(session.their_kyber_public_key.data(), session.their_kyber_public_key.size());
                 if (!session.root_key.empty())
                     secure_wipe(session.root_key.data(), session.root_key.size());
                 if (!session.send_key.empty())

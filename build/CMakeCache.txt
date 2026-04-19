@@ -242,6 +242,9 @@ Z_VCPKG_PWSH_PATH:FILEPATH=Z_VCPKG_PWSH_PATH-NOTFOUND
 // triplet
 _VCPKG_INSTALLED_DIR:PATH=C:/vcpkg/installed
 
+//The directory containing a CMake configuration file for liboqs.
+liboqs_DIR:PATH=C:/vcpkg/installed/x64-windows-static/share/liboqs
+
 //The directory containing a CMake configuration file for nlohmann_json.
 nlohmann_json_DIR:PATH=C:/vcpkg/installed/x64-windows-static/share/nlohmann_json
 

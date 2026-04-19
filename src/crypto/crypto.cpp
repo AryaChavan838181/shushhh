@@ -1,6 +1,7 @@
 #include "crypto/crypto.h"
 
 #include <sodium.h>
+#include <oqs/oqs.h>
 #include <nlohmann/json.hpp>
 
 #include <iostream>
@@ -23,13 +24,27 @@ bool crypto_init() {
 }
 
 // ============================================================
-// F-02 · X25519 key exchange
+// F-02 & F-12 · Hybrid key exchange (X25519 + ML-KEM-768)
 // ============================================================
 
-KeyPair generate_x25519_keypair() {
-    KeyPair kp;
+HybridKeyPair generate_hybrid_keypair() {
+    HybridKeyPair kp;
     // crypto_box_keypair generates a Curve25519 keypair suitable for X25519 ECDH
-    crypto_box_keypair(kp.public_key, kp.private_key);
+    crypto_box_keypair(kp.x25519_public, kp.x25519_private);
+
+    // Generate ML-KEM-768 (Kyber) keypair
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+    if (kem != nullptr) {
+        kp.kyber_public.resize(kem->length_public_key);
+        kp.kyber_private.resize(kem->length_secret_key);
+        if (OQS_KEM_keypair(kem, kp.kyber_public.data(), kp.kyber_private.data()) != OQS_SUCCESS) {
+            std::cerr << "[-] ML-KEM-768 key generation failed\n";
+        }
+        OQS_KEM_free(kem);
+    } else {
+        std::cerr << "[-] Failed to initialize ML-KEM-768 subsystem\n";
+    }
+
     return kp;
 }
 
@@ -277,62 +292,162 @@ std::string decrypt_message(
 }
 
 // ============================================================
-// F-05 · MessageSession management
+// F-05 & F-12 · Hybrid MessageSession management
 // ============================================================
 
-MessageSession create_session(
-    const KeyPair& my_keypair,
-    const unsigned char* their_public_key
+MessageSession create_session_initiator(
+    const HybridKeyPair& my_keypair,
+    const unsigned char* their_x25519_public,
+    const std::vector<unsigned char>& their_kyber_public,
+    std::vector<unsigned char>& out_kyber_ciphertext
 ) {
     MessageSession session;
 
-    // Copy keypair and peer's public key into session
-    std::memcpy(session.my_keypair.private_key, my_keypair.private_key, 32);
-    std::memcpy(session.my_keypair.public_key, my_keypair.public_key, 32);
-    std::memcpy(session.their_public_key, their_public_key, 32);
+    // Copy keypair and peer's public keys into session
+    session.my_keypair = my_keypair;
+    std::memcpy(session.their_x25519_public_key, their_x25519_public, 32);
+    session.their_kyber_public_key = their_kyber_public;
 
-    // Compute X25519 shared secret
-    auto shared = compute_x25519_shared_secret(my_keypair.private_key, their_public_key);
-    if (shared.empty()) {
-        std::cerr << "[-] Session creation failed — X25519 shared secret computation failed\n";
+    // 1. Compute X25519 shared secret
+    auto x25519_secret = compute_x25519_shared_secret(my_keypair.x25519_private, their_x25519_public);
+    if (x25519_secret.empty()) {
+        std::cerr << "[-] Session creation failed — X25519 computation failed\n";
         return session;
     }
 
+    // 2. Compute ML-KEM-768 shared secret via encapsulation
+    std::vector<unsigned char> kyber_secret;
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+    if (kem != nullptr) {
+        out_kyber_ciphertext.resize(kem->length_ciphertext);
+        kyber_secret.resize(kem->length_shared_secret);
+        if (OQS_KEM_encaps(kem, out_kyber_ciphertext.data(), kyber_secret.data(), their_kyber_public.data()) != OQS_SUCCESS) {
+             std::cerr << "[-] Session creation failed — ML-KEM-768 encapsulation failed\n";
+             OQS_KEM_free(kem);
+             return session;
+        }
+        OQS_KEM_free(kem);
+    } else {
+        std::cerr << "[-] ML-KEM subsystem unavailable\n";
+        return session;
+    }
+
+    // 3. Combine secrets into Initial Keying Material (IKM) -> 32 + 32 = 64 bytes
+    std::vector<unsigned char> ikm;
+    ikm.reserve(x25519_secret.size() + kyber_secret.size());
+    ikm.insert(ikm.end(), x25519_secret.begin(), x25519_secret.end());
+    ikm.insert(ikm.end(), kyber_secret.begin(), kyber_secret.end());
+
     // Derive root key via HKDF
-    // The info string binds this derivation to its purpose — prevents key confusion
     session.root_key = hkdf_derive(
-        shared.data(), shared.size(),
+        ikm.data(), ikm.size(),
         nullptr, 0,
         "shushhh_session_key_v1",
         32
     );
 
-    // In Phase 0 send_key and recv_key are identical (derived from the same root)
-    // Phase 2 will differentiate these via the symmetric ratchet
+    // Initial send/recv keys are derived from the root
     session.send_key = session.root_key;
     session.recv_key = session.root_key;
-
     session.send_counter = 0;
     session.recv_counter = 0;
 
-    // Wipe the raw shared secret — HKDF output is all we need going forward
-    secure_wipe(shared.data(), shared.size());
+    // Wipe the raw shared secrets immediately
+    secure_wipe(x25519_secret.data(), x25519_secret.size());
+    secure_wipe(kyber_secret.data(), kyber_secret.size());
+    secure_wipe(ikm.data(), ikm.size());
 
-    std::cout << "[+] Session created — keys derived, counters initialized\n";
+    std::cout << "[+] Session created (Initiator) — hybrid keys derived, counters initialized\n";
+    return session;
+}
+
+MessageSession create_session_responder(
+    const HybridKeyPair& my_keypair,
+    const unsigned char* their_x25519_public,
+    const std::vector<unsigned char>& kyber_ciphertext
+) {
+    MessageSession session;
+    session.my_keypair = my_keypair;
+    std::memcpy(session.their_x25519_public_key, their_x25519_public, 32);
+    // Peer's kyber pubkey is unknown to responder, and unneeded for messaging
+
+    // 1. Compute X25519 shared secret
+    auto x25519_secret = compute_x25519_shared_secret(my_keypair.x25519_private, their_x25519_public);
+    if (x25519_secret.empty()) {
+        std::cerr << "[-] Session creation failed — X25519 computation failed\n";
+        return session;
+    }
+
+    // 2. Compute ML-KEM-768 shared secret via decapsulation
+    std::vector<unsigned char> kyber_secret;
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+    if (kem != nullptr) {
+        kyber_secret.resize(kem->length_shared_secret);
+        if (OQS_KEM_decaps(kem, kyber_secret.data(), kyber_ciphertext.data(), my_keypair.kyber_private.data()) != OQS_SUCCESS) {
+            std::cerr << "[-] Session creation failed — ML-KEM-768 decapsulation failed\n";
+            OQS_KEM_free(kem);
+            return session;
+        }
+        OQS_KEM_free(kem);
+    } else {
+        std::cerr << "[-] ML-KEM subsystem unavailable\n";
+        return session;
+    }
+
+    // 3. Combine secrets
+    std::vector<unsigned char> ikm;
+    ikm.reserve(x25519_secret.size() + kyber_secret.size());
+    ikm.insert(ikm.end(), x25519_secret.begin(), x25519_secret.end());
+    ikm.insert(ikm.end(), kyber_secret.begin(), kyber_secret.end());
+
+    // Derive root key via HKDF
+    session.root_key = hkdf_derive(
+        ikm.data(), ikm.size(),
+        nullptr, 0,
+        "shushhh_session_key_v1",
+        32
+    );
+
+    session.send_key = session.root_key;
+    session.recv_key = session.root_key;
+    session.send_counter = 0;
+    session.recv_counter = 0;
+
+    secure_wipe(x25519_secret.data(), x25519_secret.size());
+    secure_wipe(kyber_secret.data(), kyber_secret.size());
+    secure_wipe(ikm.data(), ikm.size());
+
+    std::cout << "[+] Session created (Responder) — hybrid keys derived, counters initialized\n";
     return session;
 }
 
 EncryptedMessage session_encrypt(MessageSession& session, const std::string& plaintext) {
     EncryptedMessage enc = encrypt_message(plaintext, session.send_key.data());
+
+    // F-13: Symmetric Ratchet — derive next send key, verify wiping old key
+    std::string info = "shushhh_ratchet_v1:" + std::to_string(session.send_counter);
+    auto next_key = hkdf_derive(session.send_key.data(), 32, nullptr, 0, info, 32);
+    
+    secure_wipe(session.send_key.data(), session.send_key.size());
+    session.send_key = next_key;
     session.send_counter++;
+
     return enc;
 }
 
 std::string session_decrypt(MessageSession& session, const EncryptedMessage& encrypted) {
     std::string plaintext = decrypt_message(encrypted, session.recv_key.data());
+    
     if (!plaintext.empty()) {
+        // F-13: Symmetric Ratchet — derive next recv key, verify wiping old key
+        std::string info = "shushhh_ratchet_v1:" + std::to_string(session.recv_counter);
+        auto next_key = hkdf_derive(session.recv_key.data(), 32, nullptr, 0, info, 32);
+        
+        secure_wipe(session.recv_key.data(), session.recv_key.size());
+        session.recv_key = next_key;
         session.recv_counter++;
     }
+    
     return plaintext;
 }
 
@@ -500,11 +615,11 @@ void FullCryptoTest() {
     // --- Test 1: X25519 shared secret symmetry ---
     std::cout << "[*] Test 1: X25519 shared secret symmetry\n";
     {
-        KeyPair alice = generate_x25519_keypair();
-        KeyPair bob   = generate_x25519_keypair();
+        HybridKeyPair alice = generate_hybrid_keypair();
+        HybridKeyPair bob   = generate_hybrid_keypair();
 
-        auto shared1 = compute_x25519_shared_secret(alice.private_key, bob.public_key);
-        auto shared2 = compute_x25519_shared_secret(bob.private_key, alice.public_key);
+        auto shared1 = compute_x25519_shared_secret(alice.x25519_private, bob.x25519_public);
+        auto shared2 = compute_x25519_shared_secret(bob.x25519_private, alice.x25519_public);
 
         if (shared1.empty() || shared2.empty()) {
             std::cerr << "    [-] FAIL: shared secret computation returned empty\n";
@@ -517,8 +632,10 @@ void FullCryptoTest() {
         }
 
         // Wipe test key material
-        secure_wipe(alice.private_key, 32);
-        secure_wipe(bob.private_key, 32);
+        secure_wipe(alice.x25519_private, 32);
+        secure_wipe(bob.x25519_private, 32);
+        secure_wipe(alice.kyber_private.data(), alice.kyber_private.size());
+        secure_wipe(bob.kyber_private.data(), bob.kyber_private.size());
         secure_wipe(shared1.data(), shared1.size());
         secure_wipe(shared2.data(), shared2.size());
     }
@@ -593,22 +710,27 @@ void FullCryptoTest() {
     }
 
     // --- Test 4: Session encrypt / decrypt roundtrip ---
-    std::cout << "[*] Test 4: Session encrypt/decrypt roundtrip\n";
+    std::cout << "[*] Test 4: Hybrid Session (ML-KEM-768 + X25519) roundtrip + Ratchet\n";
     {
-        KeyPair alice = generate_x25519_keypair();
-        KeyPair bob   = generate_x25519_keypair();
+        HybridKeyPair alice = generate_hybrid_keypair();
+        HybridKeyPair bob   = generate_hybrid_keypair();
 
-        MessageSession alice_session = create_session(alice, bob.public_key);
-        MessageSession bob_session   = create_session(bob, alice.public_key);
+        std::vector<unsigned char> kyber_ciphertext;
+        MessageSession alice_session = create_session_initiator(alice, bob.x25519_public, bob.kyber_public, kyber_ciphertext);
+        MessageSession bob_session   = create_session_responder(bob, alice.x25519_public, kyber_ciphertext);
 
-        std::string message = "hello from alice to bob via shushhh";
+        // Save original keys for ratchet verification
+        auto alice_send_key_initial = alice_session.send_key;
+        auto bob_recv_key_initial = bob_session.recv_key;
+
+        std::string message = "hello from alice to bob via shushhh (quantum safe!)";
         EncryptedMessage enc = session_encrypt(alice_session, message);
         std::string dec = session_decrypt(bob_session, enc);
 
         if (dec == message) {
-            std::cout << "    [+] PASS: session roundtrip successful\n";
+            std::cout << "    [+] PASS: hybrid session roundtrip successful\n";
         } else {
-            std::cerr << "    [-] FAIL: session roundtrip failed\n";
+            std::cerr << "    [-] FAIL: hybrid session roundtrip failed\n";
             all_passed = false;
         }
 
@@ -620,14 +742,31 @@ void FullCryptoTest() {
             all_passed = false;
         }
 
+        // Verify ratchet worked (keys changed)
+        if (alice_send_key_initial != alice_session.send_key && bob_recv_key_initial != bob_session.recv_key) {
+            std::cout << "    [+] PASS: symmetric ratchet rotated keys successfully\n";
+        } else {
+            std::cerr << "    [-] FAIL: keys did not rotate after message\n";
+            all_passed = false;
+        }
+
         // Wipe session key material
-        secure_wipe(alice.private_key, 32);
-        secure_wipe(bob.private_key, 32);
-        secure_wipe(alice_session.my_keypair.private_key, 32);
-        secure_wipe(bob_session.my_keypair.private_key, 32);
+        secure_wipe(alice.x25519_private, 32);
+        secure_wipe(bob.x25519_private, 32);
+        secure_wipe(alice.kyber_private.data(), alice.kyber_private.size());
+        secure_wipe(bob.kyber_private.data(), bob.kyber_private.size());
+        
+        secure_wipe(alice_session.my_keypair.x25519_private, 32);
+        secure_wipe(bob_session.my_keypair.x25519_private, 32);
+        secure_wipe(alice_session.my_keypair.kyber_private.data(), alice_session.my_keypair.kyber_private.size());
+        secure_wipe(bob_session.my_keypair.kyber_private.data(), bob_session.my_keypair.kyber_private.size());
+
+        secure_wipe(kyber_ciphertext.data(), kyber_ciphertext.size());
+        
         secure_wipe(alice_session.root_key.data(), alice_session.root_key.size());
         secure_wipe(alice_session.send_key.data(), alice_session.send_key.size());
         secure_wipe(alice_session.recv_key.data(), alice_session.recv_key.size());
+        
         secure_wipe(bob_session.root_key.data(), bob_session.root_key.size());
         secure_wipe(bob_session.send_key.data(), bob_session.send_key.size());
         secure_wipe(bob_session.recv_key.data(), bob_session.recv_key.size());

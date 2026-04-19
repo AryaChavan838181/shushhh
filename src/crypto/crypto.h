@@ -8,10 +8,13 @@
 // Data Structures
 // ============================================================
 
-// 32-byte X25519 keypair
-struct KeyPair {
-    unsigned char private_key[32];
-    unsigned char public_key[32];
+// Hybrid X25519 + ML-KEM-768 (Kyber) keypair
+struct HybridKeyPair {
+    unsigned char x25519_private[32];
+    unsigned char x25519_public[32];
+
+    std::vector<unsigned char> kyber_private; // 2400 bytes
+    std::vector<unsigned char> kyber_public;  // 1184 bytes
 };
 
 // A single encrypted blob ready for transport
@@ -23,9 +26,11 @@ struct EncryptedMessage {
 
 // Full session state between two clients
 struct MessageSession {
-    KeyPair my_keypair;
-    unsigned char their_public_key[32];
-    std::vector<unsigned char> root_key;    // from X25519 (+ Kyber in Phase 2)
+    HybridKeyPair my_keypair;
+    unsigned char their_x25519_public_key[32];
+    std::vector<unsigned char> their_kyber_public_key;
+
+    std::vector<unsigned char> root_key;    // from X25519 + Kyber
     std::vector<unsigned char> send_key;    // ratchets forward on each send (Phase 2)
     std::vector<unsigned char> recv_key;    // ratchets forward on each recv (Phase 2)
     uint32_t send_counter;                  // replay protection
@@ -41,11 +46,11 @@ struct MessageSession {
 bool crypto_init();
 
 // ============================================================
-// F-02 · X25519 key exchange
+// F-02 & F-12 · Hybrid key exchange
 // ============================================================
 
-// Generate a fresh X25519 keypair.
-KeyPair generate_x25519_keypair();
+// Generate a fresh HybridKeyPair (X25519 + ML-KEM-768).
+HybridKeyPair generate_hybrid_keypair();
 
 // Compute the 32-byte ECDH shared secret from our private key and their public key.
 // Returns empty vector on failure.
@@ -88,14 +93,26 @@ std::string decrypt_message(
 );
 
 // ============================================================
-// F-05 · MessageSession management
+// F-05 & F-12 · Hybrid MessageSession management
 // ============================================================
 
-// Create a session from our keypair and the peer's public key.
-// Computes shared secret via X25519, derives keys via HKDF.
-MessageSession create_session(
-    const KeyPair& my_keypair,
-    const unsigned char* their_public_key
+// Create a session as the initiator.
+// Takes the peer's hybrid public keys.
+// Populates out_kyber_ciphertext with the 1088-byte ML-KEM-768 encapsulation
+// which must be sent to the responder.
+MessageSession create_session_initiator(
+    const HybridKeyPair& my_keypair,
+    const unsigned char* their_x25519_public,
+    const std::vector<unsigned char>& their_kyber_public,
+    std::vector<unsigned char>& out_kyber_ciphertext
+);
+
+// Create a session as the responder.
+// Takes the initiator's X25519 public key and the Kyber ciphertext they generated.
+MessageSession create_session_responder(
+    const HybridKeyPair& my_keypair,
+    const unsigned char* their_x25519_public,
+    const std::vector<unsigned char>& kyber_ciphertext
 );
 
 // Encrypt a message within a session context. Increments send_counter.
@@ -184,4 +201,6 @@ std::string compute_recipient_tag(const unsigned char* public_key);
 // - JSON serialization roundtrip
 // - SHA-256 consistency (Phase 1)
 // - Ed25519 sign/verify roundtrip (Phase 1)
+// - ML-KEM-768 / Hybrid Session roundtrip (Phase 2)
+// - Symmetric Ratchet validation (Phase 2)
 void FullCryptoTest();
