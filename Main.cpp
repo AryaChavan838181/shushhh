@@ -321,13 +321,23 @@ int main() {
 
             } else if (role == 2) {
                 // Responder Flow
-                std::cout << "Enter initiator's short X25519 public key (64 hex chars):\n> ";
-                std::string init_x25519_hex;
-                std::getline(std::cin, init_x25519_hex);
+                std::cout << "Enter initiator's username:\n> ";
+                std::string init_username;
+                std::getline(std::cin, init_username);
+
+                std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, init_username);
+                if (pub_keys_json.empty()) {
+                    std::cerr << "[-] Could not fetch public keys for " << init_username << " from Key Server.\n";
+                    break;
+                }
 
                 unsigned char their_x25519[32];
-                if (init_x25519_hex.size() != 64 || !from_hex(init_x25519_hex, their_x25519, 32)) {
-                    std::cerr << "[-] Invalid X25519 hex\n";
+                try {
+                    auto j = nlohmann::json::parse(pub_keys_json);
+                    std::string x_hex = j["x25519"];
+                    if (!from_hex(x_hex, their_x25519, 32)) throw std::runtime_error("bad x25519 hex");
+                } catch (...) {
+                    std::cerr << "[-] Failed to parse fetched public keys.\n";
                     break;
                 }
 
@@ -444,22 +454,22 @@ int main() {
                         if (!plaintext.empty()) {
                             std::cout << "    [" << event_id.substr(0, 8) << "] "
                                       << plaintext << "\n";
+                                      
+                            // ACK the message — hard-delete from server ONLY if successfully read
+                            nlohmann::json ack_payload;
+                            ack_payload["event_id"] = event_id;
+                            std::string ack_url = msgserver_url + "/ack";
+                            tor_post(ack_url, ack_payload.dump());
                         } else {
                             std::cout << "    [" << event_id.substr(0, 8)
-                                      << "] (could not decrypt — wrong session key?)\n";
+                                      << "] (could not decrypt — wrong session key or corrupted)\n";
                         }
                     } else {
                         std::cout << "    [" << event_id.substr(0, 8)
                                   << "] (encrypted — create session to decrypt)\n";
                     }
-
-                    // ACK the message — hard-delete from server
-                    nlohmann::json ack_payload;
-                    ack_payload["event_id"] = event_id;
-                    std::string ack_url = msgserver_url + "/ack";
-                    tor_post(ack_url, ack_payload.dump());
                 }
-                std::cout << "\n[+] All messages ACK'd — deleted from server\n";
+                std::cout << "\n[+] Finished processing inbox.\n";
 
             } catch (const nlohmann::json::exception& e) {
                 std::cerr << "[-] Failed to parse fetch response: " << e.what() << "\n";

