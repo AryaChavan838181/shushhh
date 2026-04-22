@@ -8,9 +8,67 @@
 #include <iomanip>
 #include <cstring>
 #include <memory>
+#include <filesystem>
+#include <thread>
+#include <chrono>
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+
+// ============================================================
+// F-11b: Tor Auto-Start
+// ============================================================
+
+static bool is_tor_running() {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
+
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        WSACleanup();
+        return false;
+    }
+
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(9050);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    bool running = false;
+    if (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == 0) {
+        running = true;
+    }
+
+    closesocket(sock);
+    WSACleanup();
+    return running;
+}
+
+static bool launch_tor_silently() {
+    std::string tor_path = "tor.exe";
+    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor.exe")) {
+        tor_path = "tor/tor.exe";
+    }
+    if (!std::filesystem::exists(tor_path)) return false;
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // CREATE_NO_WINDOW hides the console window
+    if (!CreateProcessA(tor_path.c_str(), NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return false;
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
 
 // ============================================================
 // Utility: hex encode/decode for public key display and input
@@ -66,6 +124,29 @@ int main() {
 
     // Initialize libcurl globally
     curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    std::cout << "[*] Initializing shushhh client...\n";
+
+    if (!is_tor_running()) {
+        std::cout << "[*] Tor daemon not found on port 9050. Attempting to launch background Tor...\n";
+        if (launch_tor_silently()) {
+            std::cout << "[*] Background Tor launched. Waiting for it to bind port 9050...\n";
+            int retries = 30; // up to 15 seconds
+            while (!is_tor_running() && retries > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                retries--;
+            }
+            if (is_tor_running()) {
+                std::cout << "[+] Tor successfully bound to port 9050.\n";
+            } else {
+                std::cerr << "[-] Tor failed to bind within the timeout. Ensure tor.exe is functional.\n";
+            }
+        } else {
+            std::cerr << "[-] Could not find or launch tor.exe. You will need to run Tor manually.\n";
+        }
+    } else {
+        std::cout << "[+] Tor daemon detected on port 9050.\n";
+    }
 
     // ================================================================
     // F-11: Launch watchdog — monitors USB and wipes on disconnect

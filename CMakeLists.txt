@@ -42,3 +42,10 @@ target_link_libraries(shushhh PRIVATE
 if(WIN32)
     target_link_libraries(shushhh PRIVATE ws2_32 crypt32 bcrypt)
 endif()
+
+# --- Standalone USB Installer ---
+add_executable(shushhh_installer src/installer/Installer.cpp)
+if(WIN32)
+    # Statically link C++ runtime for portability
+    set_property(TARGET shushhh_installer PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
