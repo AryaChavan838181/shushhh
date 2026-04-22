@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 
+struct HybridKeyPair; // Forward declaration
+
 // ============================================================
 // F-08 · LoginProvider interface
 // ============================================================
@@ -42,10 +44,24 @@ public:
     // Returns true on success.
     bool register_account(const std::string& server_url);
 
+    // Upload public keys to the Key Server. Requires successful authentication.
+    bool upload_public_keys(const std::string& server_url, const std::string& public_keys_json);
+
+    // Fetch public keys for a specific username from the Key Server.
+    static std::string fetch_public_keys(const std::string& server_url, const std::string& target_username);
+
+    // Persist identity to disk (encrypted with credential_hash_).
+    bool save_identity(const HybridKeyPair& keypair, const std::string& filepath);
+
+    // Load identity from disk (decrypted with credential_hash_).
+    bool load_identity(HybridKeyPair& keypair, const std::string& filepath);
+
 private:
     std::string username_;
     std::vector<unsigned char> credential_hash_;
     bool authenticated_ = false;
+    std::string auth_token_;
+    std::string auth_signature_;
 
     // Prompt for username and password from stdin.
     // Password input is masked (no echo).

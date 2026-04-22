@@ -78,7 +78,8 @@ int main() {
     // ================================================================
     // F-08: Login / Registration flow
     // ================================================================
-    std::string server_url = "http://127.0.0.1:5000"; // Default — localhost for testing
+    std::string keyserver_url = "http://127.0.0.1:5000";
+    std::string msgserver_url = "http://127.0.0.1:5001";
 
     std::cout << "\n";
     std::cout << "  +------------------------------------+\n";
@@ -89,12 +90,14 @@ int main() {
     std::cout << "  |  3. Skip (offline mode)            |\n";
     std::cout << "  +------------------------------------+\n";
 
-    std::cout << "\n  Server URL (Enter for default " << server_url << "): ";
+    std::cout << "\n  Key Server URL (Enter for default " << keyserver_url << "): ";
     std::string url_input;
     std::getline(std::cin, url_input);
-    if (!url_input.empty()) {
-        server_url = url_input;
-    }
+    if (!url_input.empty()) keyserver_url = url_input;
+
+    std::cout << "  Msg Server URL (Enter for default " << msgserver_url << "): ";
+    std::getline(std::cin, url_input);
+    if (!url_input.empty()) msgserver_url = url_input;
 
     std::cout << "  > ";
     int auth_choice = 0;
@@ -106,16 +109,16 @@ int main() {
 
     switch (auth_choice) {
     case 1: {
-        authenticated = login->authenticate(server_url);
+        authenticated = login->authenticate(keyserver_url);
         if (!authenticated) {
             std::cerr << "[-] Authentication failed — continuing in offline mode\n";
         }
         break;
     }
     case 2: {
-        if (login->register_account(server_url)) {
+        if (login->register_account(keyserver_url)) {
             std::cout << "[+] Now logging in with the new account...\n";
-            authenticated = login->authenticate(server_url);
+            authenticated = login->authenticate(keyserver_url);
         }
         break;
     }
@@ -128,10 +131,32 @@ int main() {
     }
 
     // ================================================================
-    // Session state — persists across menu iterations
+    // Session state & Persistent Identity
     // ================================================================
     HybridKeyPair my_keypair;
     bool has_keypair = false;
+
+    if (authenticated) {
+        if (login->load_identity(my_keypair, "identity.dat")) {
+            std::cout << "[+] Identity loaded securely from USB\n";
+            has_keypair = true;
+        } else {
+            std::cout << "[*] Generating new persistent identity...\n";
+            my_keypair = generate_hybrid_keypair();
+            if (login->save_identity(my_keypair, "identity.dat")) {
+                std::cout << "[+] Identity saved securely to USB\n";
+                has_keypair = true;
+                
+                // Upload to key server
+                nlohmann::json pub_keys;
+                pub_keys["x25519"] = to_hex(my_keypair.x25519_public, 32);
+                pub_keys["kyber"] = to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
+                login->upload_public_keys(keyserver_url, pub_keys.dump());
+            } else {
+                std::cerr << "[-] Failed to save identity\n";
+            }
+        }
+    }
 
     MessageSession session;
     bool has_session = false;
@@ -164,7 +189,7 @@ int main() {
         // -- Option 2: Create session --
         case 2: {
             if (!has_keypair) {
-                std::cerr << "[-] Generate a keypair first (option 1)\n";
+                std::cerr << "[-] You need a keypair first (login to generate one)\n";
                 break;
             }
 
@@ -175,25 +200,30 @@ int main() {
 
             if (role == 1) {
                 // Initiator Flow
-                std::cout << "Enter peer's full hybrid public key (" << (32 + my_keypair.kyber_public.size()) * 2 << " hex chars):\n> ";
-                std::string peer_hex;
-                std::getline(std::cin, peer_hex);
+                std::cout << "Enter peer's username:\n> ";
+                std::string peer_username;
+                std::getline(std::cin, peer_username);
 
-                size_t expected_len = (32 + my_keypair.kyber_public.size()) * 2;
-                if (peer_hex.size() != expected_len) {
-                    std::cerr << "[-] Invalid hex length — expected " << expected_len << " chars\n";
+                std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, peer_username);
+                if (pub_keys_json.empty()) {
+                    std::cerr << "[-] Could not fetch public keys for " << peer_username << " from Key Server.\n";
                     break;
                 }
 
                 unsigned char their_x25519[32];
-                if (!from_hex(peer_hex.substr(0, 64), their_x25519, 32)) {
-                    std::cerr << "[-] Invalid hex in X25519 part\n";
-                    break;
-                }
+                std::vector<unsigned char> their_kyber;
 
-                std::vector<unsigned char> their_kyber(my_keypair.kyber_public.size());
-                if (!from_hex(peer_hex.substr(64), their_kyber.data(), their_kyber.size())) {
-                    std::cerr << "[-] Invalid hex in Kyber part\n";
+                try {
+                    auto j = nlohmann::json::parse(pub_keys_json);
+                    std::string x_hex = j["x25519"];
+                    std::string k_hex = j["kyber"];
+
+                    if (!from_hex(x_hex, their_x25519, 32)) throw std::runtime_error("bad x25519 hex");
+                    
+                    their_kyber.resize(k_hex.size() / 2);
+                    if (!from_hex(k_hex, their_kyber.data(), their_kyber.size())) throw std::runtime_error("bad kyber hex");
+                } catch (...) {
+                    std::cerr << "[-] Failed to parse fetched public keys.\n";
                     break;
                 }
 
@@ -248,9 +278,9 @@ int main() {
                 break;
             }
 
-            std::cout << "Enter recipient's X25519 public key for routing (64 hex, or Enter to skip): ";
-            std::string recip_hex;
-            std::getline(std::cin, recip_hex);
+            std::cout << "Enter recipient's username for routing: ";
+            std::string recip_username;
+            std::getline(std::cin, recip_username);
 
             std::cout << "Enter message: ";
             std::string message;
@@ -259,28 +289,24 @@ int main() {
             EncryptedMessage enc = session_encrypt(session, message);
             std::string json_payload = encrypted_to_json(enc);
 
-            // Build the drop payload with routing tag
+            // Build the drop payload with routing tag (sha256 of username)
             std::string drop_payload;
-            if (!recip_hex.empty()) {
-                unsigned char recip_pub[32];
-                if (from_hex(recip_hex, recip_pub, 32)) {
-                    std::string tag = compute_recipient_tag(recip_pub);
-                    nlohmann::json drop;
-                    drop["tag"] = tag;
-                    drop["blob"] = json_payload;
-                    drop_payload = drop.dump();
-                    secure_wipe(recip_pub, 32);
-                } else {
-                    std::cerr << "[-] Invalid recipient hex — sending raw blob\n";
-                    drop_payload = json_payload;
-                }
+            if (!recip_username.empty()) {
+                std::vector<unsigned char> tag_bytes = sha256_hash(recip_username);
+                std::string tag = to_hex(tag_bytes.data(), tag_bytes.size());
+                
+                nlohmann::json drop;
+                drop["tag"] = tag;
+                drop["blob"] = json_payload;
+                drop_payload = drop.dump();
             } else {
-                drop_payload = json_payload;
+                std::cerr << "[-] Username cannot be empty.\n";
+                break;
             }
 
             std::cout << "[*] Encrypted payload (" << drop_payload.size() << " bytes)\n";
 
-            std::string url = server_url + "/drop";
+            std::string url = msgserver_url + "/drop";
             std::string resp = tor_post(url, drop_payload);
             if (!resp.empty()) {
                 std::cout << "[+] Message sent\n";
@@ -291,15 +317,18 @@ int main() {
 
         // -- Option 4: Fetch messages --
         case 4: {
-            if (!has_keypair) {
-                std::cerr << "[-] Generate a keypair first (option 1)\n";
+            if (!has_keypair || !authenticated) {
+                std::cerr << "[-] You must be logged in to fetch messages.\n";
                 break;
             }
 
-            std::string my_tag = compute_recipient_tag(my_keypair.x25519_public);
-            std::string url = server_url + "/fetch?tag=" + my_tag;
+            std::string my_username = login->get_username();
+            std::vector<unsigned char> tag_bytes = sha256_hash(my_username);
+            std::string my_tag = to_hex(tag_bytes.data(), tag_bytes.size());
 
-            std::cout << "[*] Fetching messages for tag: " << my_tag.substr(0, 16) << "...\n";
+            std::string url = msgserver_url + "/fetch?tag=" + my_tag;
+
+            std::cout << "[*] Fetching messages for " << my_username << " (tag: " << my_tag.substr(0, 16) << "...)\n";
 
             std::string resp = tor_get(url);
             if (resp.empty()) {
@@ -346,7 +375,7 @@ int main() {
                     // ACK the message — hard-delete from server
                     nlohmann::json ack_payload;
                     ack_payload["event_id"] = event_id;
-                    std::string ack_url = server_url + "/ack";
+                    std::string ack_url = msgserver_url + "/ack";
                     tor_post(ack_url, ack_payload.dump());
                 }
                 std::cout << "\n[+] All messages ACK'd — deleted from server\n";
