@@ -3,6 +3,7 @@
 #include "watchdog/watchdog.h"
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <thread>
@@ -24,6 +25,22 @@
 #include <ftxui/component/event.hpp>
 
 using namespace ftxui;
+
+// ============================================================
+// Global Log Buffer — captures ALL stdout/stderr
+// ============================================================
+std::ostringstream g_log_stream;
+std::mutex g_log_mutex;
+
+void log_msg(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_log_stream << msg;
+}
+
+std::string get_logs() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    return g_log_stream.str();
+}
 
 // ============================================================
 // Globals & State
@@ -185,10 +202,35 @@ void fetcher_thread(ScreenInteractive* screen) {
 }
 
 // ============================================================
+// Styled Button Helper
+// ============================================================
+Component StyledButton(const std::string& label, std::function<void()> on_click) {
+    auto opt = ButtonOption::Ascii();
+    opt.transform = [](const EntryState& s) {
+        auto el = text(s.label) | center;
+        if (s.focused) {
+            el = el | color(Color::Black) | bgcolor(Color::Blue) | bold;
+        } else {
+            el = el | color(Color::White) | bgcolor(Color::Black) | border;
+        }
+        return el;
+    };
+    return Button(label, std::move(on_click), opt);
+}
+
+// ============================================================
 // Main UI Application
 // ============================================================
 int main() {
-    if (!crypto_init()) return 1;
+    // --- Redirect stdout and stderr to log buffer ---
+    std::streambuf* orig_cout = std::cout.rdbuf(g_log_stream.rdbuf());
+    std::streambuf* orig_cerr = std::cerr.rdbuf(g_log_stream.rdbuf());
+
+    if (!crypto_init()) {
+        std::cout.rdbuf(orig_cout);
+        std::cerr.rdbuf(orig_cerr);
+        return 1;
+    }
     curl_global_init(CURL_GLOBAL_DEFAULT);
     
     // Auto-Tor
@@ -204,20 +246,31 @@ int main() {
     auto style_focus  = color(Color::Black) | bgcolor(Color::Blue);
     auto input_opt    = InputOption();
     input_opt.transform = [&](InputState state) {
-        return state.focused ? state.element | style_focus : state.element | style_normal;
+        auto el = state.element | size(WIDTH, GREATER_THAN, 30);
+        if (state.focused) {
+            return el | style_focus | bold;
+        } else if (state.is_placeholder) {
+            return el | color(Color::GrayDark) | bgcolor(Color::Black);
+        } else {
+            return el | style_normal;
+        }
     };
     
+    auto pass_opt = input_opt;
+    pass_opt.password = true;
+
     // --- State ---
     enum AppState { INIT, CONFIG, LOGIN, REGISTER, SETUP, CHAT };
     AppState current_state = INIT;
     std::string ui_error = "";
+    bool show_debug = false;
     
     // --- Config Components ---
     std::string input_ks = keyserver_url;
     std::string input_ms = msgserver_url;
     Component comp_ks = Input(&input_ks, "http://127.0.0.1:5000", input_opt);
     Component comp_ms = Input(&input_ms, "http://127.0.0.1:5001", input_opt);
-    auto btn_save_cfg = Button(" Save & Back ", [&] {
+    auto btn_save_cfg = StyledButton("  SAVE & BACK  ", [&] {
         if(!input_ks.empty()) keyserver_url = input_ks;
         if(!input_ms.empty()) msgserver_url = input_ms;
         current_state = INIT;
@@ -225,16 +278,16 @@ int main() {
     auto config_container = Container::Vertical({comp_ks, comp_ms, btn_save_cfg});
 
     // --- Init Components ---
-    auto btn_to_login = Button(" Login ", [&] { current_state = LOGIN; ui_error = ""; });
-    auto btn_to_reg = Button(" Register ", [&] { current_state = REGISTER; ui_error = ""; });
-    auto btn_to_cfg = Button(" Set Config ", [&] { current_state = CONFIG; });
-    auto btn_exit = Button(" Exit ", [&] { screen.Exit(); });
+    auto btn_to_login = StyledButton("     LOGIN      ", [&] { current_state = LOGIN; ui_error = ""; });
+    auto btn_to_reg   = StyledButton("   REGISTER     ", [&] { current_state = REGISTER; ui_error = ""; });
+    auto btn_to_cfg   = StyledButton("  SET CONFIG    ", [&] { current_state = CONFIG; });
+    auto btn_exit     = StyledButton("     EXIT       ", [&] { screen.Exit(); });
     auto init_container = Container::Vertical({btn_to_login, btn_to_reg, btn_to_cfg, btn_exit});
 
     // --- Login/Register Components ---
     std::string input_user, input_pass;
     Component comp_user = Input(&input_user, "username", input_opt);
-    Component comp_pass = Input(&input_pass, "password", input_opt);
+    Component comp_pass = Input(&input_pass, "password", pass_opt);
     
     auto auth_action = [&](bool is_register) {
         PasswordLogin login;
@@ -267,16 +320,16 @@ int main() {
         }
     };
 
-    auto btn_login = Button(" LOGIN ", [&] { auth_action(false); });
+    auto btn_login = StyledButton("     LOGIN      ", [&] { auth_action(false); });
     auto login_container = Container::Vertical({comp_user, comp_pass, btn_login});
     
-    auto btn_register = Button(" REGISTER ", [&] { auth_action(true); });
+    auto btn_register = StyledButton("   REGISTER     ", [&] { auth_action(true); });
     auto register_container = Container::Vertical({comp_user, comp_pass, btn_register});
     
     // --- Setup Components ---
     std::string input_peer;
     Component comp_peer = Input(&input_peer, "target_username", input_opt);
-    auto btn_connect = Button(" CONNECT ", [&]() {
+    auto btn_connect = StyledButton("    CONNECT     ", [&]() {
         std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, input_peer);
         if (pub_keys_json.empty()) {
             ui_error = "[-] Peer not found";
@@ -316,13 +369,13 @@ int main() {
             chat_history.push_back("[SYSTEM] [+] Handshake sent to " + peer_username);
         } catch(...) { ui_error = "[-] Parse error"; }
     });
-    auto btn_wait = Button(" WAIT FOR MESSAGES ", [&]() { current_state = CHAT; });
+    auto btn_wait = StyledButton(" WAIT FOR MSGS  ", [&]() { current_state = CHAT; });
     auto setup_container = Container::Vertical({comp_peer, btn_connect, btn_wait});
     
     // --- Chat Components ---
     std::string input_msg;
     Component comp_msg = Input(&input_msg, "Type message...", input_opt);
-    auto btn_send = Button(" SEND ", [&]() {
+    auto btn_send = StyledButton("  SEND  ", [&]() {
         if (!has_session || input_msg.empty()) return;
         EncryptedMessage enc = session_encrypt(current_session, input_msg);
         nlohmann::json drop;
@@ -337,66 +390,181 @@ int main() {
     auto chat_container = Container::Horizontal({comp_msg, btn_send});
     
     // --- Renderer ---
-    auto main_container = Container::Tab({init_container, config_container, login_container, register_container, setup_container, chat_container}, (int*)&current_state);
+    auto main_container = Container::Tab(
+        {init_container, config_container, login_container, register_container, setup_container, chat_container},
+        (int*)&current_state
+    );
 
     auto renderer = Renderer(main_container, [&] {
+        Element page;
+        std::string hint = " [ESC] Quit  [Alt+X] Debug ";
+
         if (current_state == INIT) {
-            return window(text(" [ MAIN MENU ] "), vbox({
+            page = vbox({
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  ███████╗██╗  ██╗██╗   ██╗███████╗██╗  ██╗██╗  ██╗██╗  ██╗") | color(Color::Blue) | bold,
+                text("  ██╔════╝██║  ██║██║   ██║██╔════╝██║  ██║██║  ██║██║  ██║") | color(Color::Blue) | bold,
+                text("  ███████╗███████║██║   ██║███████╗███████║███████║███████║") | color(Color::Blue) | bold,
+                text("  ╚════██║██╔══██║██║   ██║╚════██║██╔══██║██╔══██║██╔══██║") | color(Color::Blue) | bold,
+                text("  ███████║██║  ██║╚██████╔╝███████║██║  ██║██║  ██║██║  ██║") | color(Color::Blue) | bold,
+                text("  ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝") | color(Color::Blue) | bold,
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Quantum-Safe Encrypted Messenger") | color(Color::GrayLight) | center,
+                text("") | size(HEIGHT, EQUAL, 2),
                 btn_to_login->Render() | center,
+                text("") | size(HEIGHT, EQUAL, 1),
                 btn_to_reg->Render() | center,
+                text("") | size(HEIGHT, EQUAL, 1),
                 btn_to_cfg->Render() | center,
-                separator(),
-                btn_exit->Render() | center
-            })) | center | style_normal;
+                text("") | size(HEIGHT, EQUAL, 2),
+                separator() | color(Color::GrayDark),
+                text("") | size(HEIGHT, EQUAL, 1),
+                btn_exit->Render() | center,
+            }) | center | style_normal;
         } else if (current_state == CONFIG) {
-            return window(text(" [ CONFIGURATION ] "), vbox({
-                text("Key Server URL:"), comp_ks->Render(),
-                text("Message Server URL:"), comp_ms->Render(),
-                separator(),
-                btn_save_cfg->Render() | center
-            })) | center | style_normal;
+            page = window(text(" [ CONFIGURATION ] ") | bold | color(Color::Blue), vbox({
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Key Server URL:") | color(Color::GrayLight),
+                comp_ks->Render() | size(WIDTH, GREATER_THAN, 40),
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Message Server URL:") | color(Color::GrayLight),
+                comp_ms->Render() | size(WIDTH, GREATER_THAN, 40),
+                text("") | size(HEIGHT, EQUAL, 2),
+                btn_save_cfg->Render() | center,
+                text("") | size(HEIGHT, EQUAL, 1),
+            })) | center | size(WIDTH, GREATER_THAN, 50) | style_normal;
         } else if (current_state == LOGIN || current_state == REGISTER) {
-            auto title = current_state == LOGIN ? " [ LOGIN ] " : " [ REGISTER ] ";
+            std::string title = current_state == LOGIN ? " [ LOGIN ] " : " [ REGISTER ] ";
             auto btn = current_state == LOGIN ? btn_login->Render() : btn_register->Render();
-            return window(text(title), vbox({
-                text("Username:"), comp_user->Render(),
-                text("Password:"), comp_pass->Render(),
-                separator(),
+            page = window(text(title) | bold | color(Color::Blue), vbox({
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Username:") | color(Color::GrayLight),
+                comp_user->Render() | size(WIDTH, GREATER_THAN, 35),
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Password:") | color(Color::GrayLight),
+                comp_pass->Render() | size(WIDTH, GREATER_THAN, 35),
+                text("") | size(HEIGHT, EQUAL, 2),
                 btn | center,
-                text(ui_error) | color(Color::Red)
-            })) | center | style_normal;
+                text("") | size(HEIGHT, EQUAL, 1),
+                (ui_error.empty() ? text("") : text("  " + ui_error) | color(Color::Red) | bold),
+                text("") | size(HEIGHT, EQUAL, 1),
+            })) | center | size(WIDTH, GREATER_THAN, 45) | style_normal;
         } else if (current_state == SETUP) {
-            return window(text(" [ SECURE ROUTING ] "), vbox({
-                text("Connect to Peer:"), comp_peer->Render(),
+            page = window(text(" [ SECURE ROUTING ] ") | bold | color(Color::Blue), vbox({
+                text("") | size(HEIGHT, EQUAL, 1),
+                text("  Connect to Peer:") | color(Color::GrayLight),
+                comp_peer->Render() | size(WIDTH, GREATER_THAN, 35),
+                text("") | size(HEIGHT, EQUAL, 2),
                 btn_connect->Render() | center,
-                separator(),
+                text("") | size(HEIGHT, EQUAL, 1),
+                separator() | color(Color::GrayDark),
+                text("") | size(HEIGHT, EQUAL, 1),
                 btn_wait->Render() | center,
-                text(ui_error) | color(Color::Red)
-            })) | center | style_normal;
+                text("") | size(HEIGHT, EQUAL, 1),
+                (ui_error.empty() ? text("") : text("  " + ui_error) | color(Color::Red) | bold),
+                text("") | size(HEIGHT, EQUAL, 1),
+            })) | center | size(WIDTH, GREATER_THAN, 45) | style_normal;
         } else {
+            // CHAT
             Elements history_elements;
-            std::lock_guard<std::mutex> lock(chat_mutex);
-            for (const auto& msg : chat_history) {
-                if (msg.find(my_username + ">") == 0) {
-                    history_elements.push_back(text(msg) | color(Color::Green));
-                } else if (msg.find(peer_username + ">") == 0) {
-                    history_elements.push_back(text(msg) | color(Color::Cyan));
-                } else {
-                    history_elements.push_back(text(msg) | color(Color::GrayDark));
+            {
+                std::lock_guard<std::mutex> lock(chat_mutex);
+                for (const auto& msg : chat_history) {
+                    if (msg.find(my_username + ">") == 0) {
+                        history_elements.push_back(text(" " + msg) | color(Color::Green));
+                    } else if (msg.find(peer_username + ">") == 0) {
+                        history_elements.push_back(text(" " + msg) | color(Color::Cyan));
+                    } else {
+                        history_elements.push_back(text(" " + msg) | color(Color::GrayDark));
+                    }
                 }
             }
+            if (history_elements.empty()) {
+                history_elements.push_back(text("  Waiting for messages...") | color(Color::GrayDark));
+            }
             
-            return vbox({
-                text(" Status: SECURE | Identity: " + my_username + " | Peer: " + peer_username) | color(Color::Black) | bgcolor(Color::White),
-                window(text(" Chat History "), vbox(std::move(history_elements))) | flex,
-                hbox({ text(" [You]: "), comp_msg->Render() | flex, btn_send->Render() })
+            page = vbox({
+                hbox({
+                    text(" SECURE ") | color(Color::Black) | bgcolor(Color::Green) | bold,
+                    text("  " + my_username) | color(Color::Blue) | bold,
+                    text("  <->  ") | color(Color::GrayDark),
+                    text(peer_username.empty() ? "waiting..." : peer_username) | color(Color::Cyan) | bold,
+                    filler(),
+                    text(hint) | color(Color::GrayDark),
+                }) | bgcolor(Color::Black),
+                separator() | color(Color::Blue),
+                window(text(" Chat ") | color(Color::Blue), vbox(std::move(history_elements))) | flex,
+                separator() | color(Color::Blue),
+                hbox({
+                    text(" > ") | color(Color::Blue) | bold,
+                    comp_msg->Render() | flex,
+                    text(" "),
+                    btn_send->Render(),
+                }) | bgcolor(Color::Black),
             }) | style_normal;
         }
+
+        // Status bar at bottom
+        auto status_bar = hbox({
+            text(" shushhh v2.0 ") | color(Color::Black) | bgcolor(Color::Blue) | bold,
+            filler(),
+            text(hint) | color(Color::GrayDark),
+        });
+
+        Element final_page;
+        if (current_state == CHAT) {
+            final_page = page; // chat has its own status
+        } else {
+            final_page = vbox({ page | flex, status_bar });
+        }
+
+        // Debug overlay
+        if (show_debug) {
+            std::string logs = get_logs();
+            // Split logs into lines, show last 20
+            std::vector<Element> log_lines;
+            std::istringstream iss(logs);
+            std::string line;
+            std::vector<std::string> all_lines;
+            while (std::getline(iss, line)) {
+                all_lines.push_back(line);
+            }
+            size_t start = all_lines.size() > 25 ? all_lines.size() - 25 : 0;
+            for (size_t i = start; i < all_lines.size(); ++i) {
+                log_lines.push_back(text(" " + all_lines[i]) | color(Color::GrayLight));
+            }
+            if (log_lines.empty()) {
+                log_lines.push_back(text("  (no logs yet)") | color(Color::GrayDark));
+            }
+
+            auto debug_panel = window(
+                text(" [ DEBUG LOG ] Alt+X to close ") | bold | color(Color::Yellow),
+                vbox(std::move(log_lines))
+            ) | size(HEIGHT, LESS_THAN, 15) | size(WIDTH, LESS_THAN, 80) | bgcolor(Color::Black) | color(Color::White);
+
+            final_page = vbox({
+                final_page | flex,
+                debug_panel,
+            });
+        }
+
+        return final_page;
     });
     
     auto event_listener = CatchEvent(renderer, [&](Event event) {
-        if (event == Event::Escape || event == Event::Character((char)3)) { // Esc or Ctrl+C
+        // Escape to quit
+        if (event == Event::Escape) {
             screen.Exit();
+            return true;
+        }
+        // Ctrl+C
+        if (event == Event::CtrlC) {
+            screen.Exit();
+            return true;
+        }
+        // Alt+X toggle debug
+        if (event == Event::AltX) {
+            show_debug = !show_debug;
             return true;
         }
         return false;
@@ -411,6 +579,10 @@ int main() {
     // Cleanup
     keep_running = false;
     fetcher.join();
+    
+    // Restore streams
+    std::cout.rdbuf(orig_cout);
+    std::cerr.rdbuf(orig_cerr);
     
     // Wipe keys
     if (has_keypair) {
