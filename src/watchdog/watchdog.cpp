@@ -32,12 +32,12 @@ char detect_usb_drive() {
     UINT drive_type = GetDriveTypeA(root_path);
 
     if (drive_type == DRIVE_REMOVABLE) {
-        std::cout << "[+] USB drive detected: " << drive_letter << ":\\\n";
+        std::cerr << "[+] USB drive detected: " << drive_letter << ":\\\n";
         return drive_letter;
     }
 
     // If running from a fixed drive (during development), warn but continue
-    std::cout << "[*] Running from non-removable drive " << drive_letter
+    std::cerr << "[*] Running from non-removable drive " << drive_letter
               << ":\\ — watchdog will monitor this drive\n";
     return drive_letter;
 }
@@ -146,9 +146,9 @@ bool launch_watchdog(char drive_letter) {
     std::thread monitor(watchdog_monitor, drive_letter, temp_dir);
     monitor.detach();
 
-    std::cout << "[+] Watchdog launched — monitoring drive "
+    std::cerr << "[+] Watchdog launched — monitoring drive "
               << drive_letter << ":\\\n";
-    std::cout << "    Wipe script at: " << temp_dir << "\\shushhh_wipe.bat\n";
+    std::cerr << "    Wipe script at: " << temp_dir << "\\shushhh_wipe.bat\n";
 
     return true;
 }

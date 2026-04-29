@@ -282,7 +282,7 @@ int main() {
     auto btn_exit     = StyledButton("     EXIT       ", [&] { screen.Exit(); });
     auto init_container = Container::Vertical({btn_to_login, btn_to_reg, btn_to_cfg, btn_exit});
 
-    // --- Login/Register Components ---
+    // --- Login/Register Components (single shared container) ---
     std::string input_user, input_pass;
     Component comp_user = Input(&input_user, "username", input_opt);
     Component comp_pass = Input(&input_pass, "password", pass_opt);
@@ -320,11 +320,16 @@ int main() {
         ui_error = "";
     };
 
-    auto btn_login = StyledButton("     LOGIN      ", [&] { auth_action(false); });
-    auto login_container = Container::Vertical({comp_user, comp_pass, btn_login});
-    
-    auto btn_register = StyledButton("   REGISTER     ", [&] { auth_action(true); });
-    auto register_container = Container::Vertical({comp_user, comp_pass, btn_register});
+    auto btn_auth_action = StyledButton("    SUBMIT      ", [&] {
+        auth_action(current_state == REGISTER);
+    });
+    auto btn_auth_back = StyledButton("     BACK       ", [&] {
+        current_state = INIT;
+        input_user = "";
+        input_pass = "";
+        ui_error = "";
+    });
+    auto auth_container = Container::Vertical({comp_user, comp_pass, btn_auth_action, btn_auth_back});
     
     // --- Setup Components ---
     std::string input_peer;
@@ -390,12 +395,24 @@ int main() {
     auto chat_container = Container::Horizontal({comp_msg, btn_send});
     
     // --- Renderer ---
+    // Tab index: INIT=0, CONFIG=1, AUTH(login/register)=2, SETUP=3, CHAT=4
+    int tab_index = 0;
     auto main_container = Container::Tab(
-        {init_container, config_container, login_container, register_container, setup_container, chat_container},
-        (int*)&current_state
+        {init_container, config_container, auth_container, setup_container, chat_container},
+        &tab_index
     );
 
     auto renderer = Renderer(main_container, [&] {
+        // Map AppState to tab index
+        switch(current_state) {
+            case INIT:     tab_index = 0; break;
+            case CONFIG:   tab_index = 1; break;
+            case LOGIN:    tab_index = 2; break;
+            case REGISTER: tab_index = 2; break;
+            case SETUP:    tab_index = 3; break;
+            case CHAT:     tab_index = 4; break;
+        }
+
         Element page;
         std::string hint = " [ESC] Quit  [Alt+X] Debug ";
 
@@ -435,7 +452,6 @@ int main() {
             })) | center | size(WIDTH, GREATER_THAN, 50) | style_normal;
         } else if (current_state == LOGIN || current_state == REGISTER) {
             std::string title = current_state == LOGIN ? " [ LOGIN ] " : " [ REGISTER ] ";
-            auto btn = current_state == LOGIN ? btn_login->Render() : btn_register->Render();
             page = window(text(title) | bold | color(Color::Blue), vbox({
                 text("") | size(HEIGHT, EQUAL, 1),
                 text("  Username:") | color(Color::GrayLight),
@@ -444,7 +460,9 @@ int main() {
                 text("  Password:") | color(Color::GrayLight),
                 comp_pass->Render() | size(WIDTH, GREATER_THAN, 35),
                 text("") | size(HEIGHT, EQUAL, 2),
-                btn | center,
+                btn_auth_action->Render() | center,
+                text("") | size(HEIGHT, EQUAL, 1),
+                btn_auth_back->Render() | center,
                 text("") | size(HEIGHT, EQUAL, 1),
                 (ui_error.empty() ? text("") : text("  " + ui_error) | color(Color::Red) | bold),
                 text("") | size(HEIGHT, EQUAL, 1),
