@@ -50,7 +50,7 @@ Dependencies managed via `vcpkg`:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/yourusername/shushhh.git](https://github.com/AryaChavan838181/shushhh.git)
+    git clone https://github.com/AryaChavan838181/shushhh.git
     cd shushhh
     ```
 
