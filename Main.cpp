@@ -79,6 +79,7 @@ static bool is_tor_running() {
 
 static bool launch_tor_silently() {
     std::string tor_path = "tor.exe";
+    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor/tor.exe")) tor_path = "tor/tor/tor.exe";
     if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor.exe")) tor_path = "tor/tor.exe";
     if (!std::filesystem::exists(tor_path)) return false;
     STARTUPINFOA si; PROCESS_INFORMATION pi;

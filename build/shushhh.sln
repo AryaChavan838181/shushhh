@@ -20,6 +20,7 @@ EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "shushhh_installer", "shushhh_installer.vcxproj", "{882E2354-FA26-3272-A2B9-B7B63CDC95DA}"
 	ProjectSection(ProjectDependencies) = postProject
 		{6BF989F0-E883-395C-B59C-CA7D4D7310FF} = {6BF989F0-E883-395C-B59C-CA7D4D7310FF}
+		{EBE648BE-72FB-39F9-BA43-1CFAFF2FB242} = {EBE648BE-72FB-39F9-BA43-1CFAFF2FB242}
 	EndProjectSection
 EndProject
 Global

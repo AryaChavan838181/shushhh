@@ -50,7 +50,7 @@ def main():
 
     # Define source paths (assuming they are in the current working directory or build dir)
     shushhh_exe = "build/shushhh.exe"  # Adjust based on where cmake outputs it
-    tor_exe = "tor/tor.exe"            # Assuming the user downloaded the Tor Expert Bundle here
+    tor_exe = "tor/tor/tor.exe"            # Assuming the user downloaded the Tor Expert Bundle here
     
     if not os.path.exists(shushhh_exe):
         print(f"[-] Could not find {shushhh_exe}. Please build the project first.")

@@ -1,0 +1,3 @@
+#include "resource_ids.h"
+IDR_SHUSHHH_EXE RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/Debug/shushhh.exe"
+IDR_TOR_EXE RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/tor/tor/tor.exe"

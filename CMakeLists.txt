@@ -47,9 +47,33 @@ if(WIN32)
     target_link_libraries(shushhh PRIVATE ws2_32 crypt32 bcrypt)
 endif()
 
-# --- Standalone USB Installer ---
-add_executable(shushhh_installer src/installer/Installer.cpp)
+# --- Standalone USB Installer (self-contained with embedded binaries) ---
+# Generate the .rc content with the path to the built shushhh.exe
+set(RC_CONTENT "#include \"resource_ids.h\"\nIDR_SHUSHHH_EXE RCDATA \"$<TARGET_FILE:shushhh>\"\n")
+# Check for tor.exe at configure time
+if(EXISTS "${CMAKE_SOURCE_DIR}/tor/tor/tor.exe")
+    string(APPEND RC_CONTENT "IDR_TOR_EXE RCDATA \"${CMAKE_SOURCE_DIR}/tor/tor/tor.exe\"\n")
+    message(STATUS "Tor found — will be embedded in installer")
+else()
+    message(STATUS "Tor NOT found at ${CMAKE_SOURCE_DIR}/tor/tor/tor.exe — installer will skip Tor")
+endif()
+
+file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
+    CONTENT "${RC_CONTENT}"
+)
+
+add_executable(shushhh_installer
+    src/installer/Installer.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
+)
+target_include_directories(shushhh_installer PRIVATE ${CMAKE_SOURCE_DIR}/src/installer)
+target_link_libraries(shushhh_installer PRIVATE
+    ftxui::screen
+    ftxui::dom
+    ftxui::component
+)
+add_dependencies(shushhh_installer shushhh)
 if(WIN32)
-    # Statically link C++ runtime for portability
     set_property(TARGET shushhh_installer PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
