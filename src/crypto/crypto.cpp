@@ -515,6 +515,88 @@ EncryptedMessage json_to_encrypted(const std::string& json_str) {
 }
 
 // ============================================================
+// Phase 2 · 0-RTT Ephemeral Handshake (Sealed Sender)
+// ============================================================
+
+HandshakePayload generate_ephemeral_handshake(
+    const unsigned char* recipient_identity_public,
+    const std::string& inner_json_payload
+) {
+    HandshakePayload hs;
+    unsigned char ephem_private[32];
+    
+    // 1. Generate ephemeral X25519 keypair
+    crypto_box_keypair(hs.ephemeral_public, ephem_private);
+    
+    // 2. Compute Outer Secret: ECDH(Ephem_Priv, Recipient_Id_Pub)
+    auto outer_secret = compute_x25519_shared_secret(ephem_private, recipient_identity_public);
+    if (outer_secret.empty()) {
+        std::cerr << "[-] Handshake generation failed\n";
+        secure_wipe(ephem_private, 32);
+        return hs;
+    }
+    
+    // 3. Derive Outer Key
+    auto outer_key = hkdf_derive(outer_secret.data(), 32, nullptr, 0, "shushhh_outer_handshake_v1", 32);
+    
+    // 4. Encrypt inner payload
+    hs.encrypted_blob = encrypt_message(inner_json_payload, outer_key.data(), 1024); // Handshakes are larger
+    
+    // Wipe ephemeral private key and secrets
+    secure_wipe(ephem_private, 32);
+    secure_wipe(outer_secret.data(), 32);
+    secure_wipe(outer_key.data(), 32);
+    
+    return hs;
+}
+
+std::string process_ephemeral_handshake(
+    const unsigned char* my_identity_private,
+    const HandshakePayload& handshake
+) {
+    // 1. Compute Outer Secret: ECDH(My_Id_Priv, Ephem_Pub)
+    auto outer_secret = compute_x25519_shared_secret(my_identity_private, handshake.ephemeral_public);
+    if (outer_secret.empty()) {
+        return "";
+    }
+    
+    // 2. Derive Outer Key
+    auto outer_key = hkdf_derive(outer_secret.data(), 32, nullptr, 0, "shushhh_outer_handshake_v1", 32);
+    
+    // 3. Decrypt
+    std::string inner_payload = decrypt_message(handshake.encrypted_blob, outer_key.data());
+    
+    // Wipe secrets
+    secure_wipe(outer_secret.data(), 32);
+    secure_wipe(outer_key.data(), 32);
+    
+    return inner_payload;
+}
+
+std::string handshake_to_json(const HandshakePayload& hs) {
+    json j;
+    j["ephemeral_public"] = to_base64(hs.ephemeral_public, 32);
+    j["blob"] = json::parse(encrypted_to_json(hs.encrypted_blob));
+    return j.dump();
+}
+
+HandshakePayload json_to_handshake(const std::string& json_str) {
+    HandshakePayload hs;
+    std::memset(hs.ephemeral_public, 0, 32);
+    try {
+        json j = json::parse(json_str);
+        auto ephem_bin = from_base64(j["ephemeral_public"].get<std::string>());
+        if (ephem_bin.size() == 32) {
+            std::memcpy(hs.ephemeral_public, ephem_bin.data(), 32);
+        }
+        hs.encrypted_blob = json_to_encrypted(j["blob"].dump());
+    } catch (const json::exception& e) {
+        std::cerr << "[-] Handshake JSON parse error: " << e.what() << "\n";
+    }
+    return hs;
+}
+
+// ============================================================
 // F-07 · Secure memory wipe
 // ============================================================
 

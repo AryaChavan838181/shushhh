@@ -134,6 +134,33 @@ std::string encrypted_to_json(const EncryptedMessage& msg);
 EncryptedMessage json_to_encrypted(const std::string& json_str);
 
 // ============================================================
+// Phase 2 · 0-RTT Ephemeral Handshake (Sealed Sender)
+// ============================================================
+
+struct HandshakePayload {
+    unsigned char ephemeral_public[32];
+    EncryptedMessage encrypted_blob;
+};
+
+// Generates an anonymous handshake. Encrypts the JSON payload (containing sender identity and Kyber ciphertext)
+// using an outer tunnel derived from a fresh Ephemeral X25519 key and the recipient's Identity X25519 public key.
+HandshakePayload generate_ephemeral_handshake(
+    const unsigned char* recipient_identity_public,
+    const std::string& inner_json_payload
+);
+
+// Processes an incoming handshake. Decrypts the payload using the recipient's private Identity X25519 key
+// and the provided Ephemeral X25519 public key. Returns empty string on failure.
+std::string process_ephemeral_handshake(
+    const unsigned char* my_identity_private,
+    const HandshakePayload& handshake
+);
+
+// Helper for Handshake serialization
+std::string handshake_to_json(const HandshakePayload& hs);
+HandshakePayload json_to_handshake(const std::string& json_str);
+
+// ============================================================
 // F-07 · Secure memory wipe
 // ============================================================
 

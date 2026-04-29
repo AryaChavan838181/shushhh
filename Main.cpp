@@ -4,44 +4,57 @@
 
 #include <iostream>
 #include <string>
-#include <sstream>
-#include <iomanip>
-#include <cstring>
-#include <memory>
-#include <filesystem>
+#include <vector>
 #include <thread>
 #include <chrono>
-
+#include <atomic>
+#include <mutex>
+#include <filesystem>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include <sodium.h>
+
+// FTXUI
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/component/event.hpp>
+
+using namespace ftxui;
 
 // ============================================================
-// F-11b: Tor Auto-Start
+// Globals & State
 // ============================================================
+std::string keyserver_url = "http://127.0.0.1:5000";
+std::string msgserver_url = "http://127.0.0.1:5001";
 
+HybridKeyPair my_keypair;
+bool has_keypair = false;
+MessageSession current_session;
+bool has_session = false;
+std::string my_username;
+std::string peer_username;
+
+std::vector<std::string> chat_history;
+std::mutex chat_mutex;
+std::atomic<bool> keep_running{true};
+
+// ============================================================
+// Tor Utilities
+// ============================================================
 static bool is_tor_running() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return false;
-
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        WSACleanup();
-        return false;
-    }
-
+    if (sock == INVALID_SOCKET) { WSACleanup(); return false; }
     sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(9050);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-
-    bool running = false;
-    if (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == 0) {
-        running = true;
-    }
-
+    bool running = (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == 0);
     closesocket(sock);
     WSACleanup();
     return running;
@@ -49,477 +62,367 @@ static bool is_tor_running() {
 
 static bool launch_tor_silently() {
     std::string tor_path = "tor.exe";
-    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor.exe")) {
-        tor_path = "tor/tor.exe";
-    }
+    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor.exe")) tor_path = "tor/tor.exe";
     if (!std::filesystem::exists(tor_path)) return false;
-
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
-
-    // CREATE_NO_WINDOW hides the console window
-    if (!CreateProcessA(tor_path.c_str(), NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        return false;
-    }
-
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    STARTUPINFOA si; PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessA(tor_path.c_str(), NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     return true;
 }
 
 // ============================================================
-// Utility: hex encode/decode for public key display and input
+// Helpers
 // ============================================================
+static std::string to_base64(const unsigned char* data, size_t len) {
+    size_t b64_maxlen = sodium_base64_ENCODED_LEN(len, sodium_base64_VARIANT_ORIGINAL);
+    std::string b64(b64_maxlen, '\0');
+    sodium_bin2base64(&b64[0], b64_maxlen, data, len, sodium_base64_VARIANT_ORIGINAL);
+    b64.resize(strlen(b64.c_str()));
+    return b64;
+}
 
 static std::string to_hex(const unsigned char* data, size_t len) {
-    std::ostringstream oss;
+    std::string hex;
     for (size_t i = 0; i < len; ++i) {
-        oss << std::hex << std::setw(2) << std::setfill('0')
-            << static_cast<int>(data[i]);
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", data[i]);
+        hex += buf;
     }
-    return oss.str();
+    return hex;
 }
 
 static bool from_hex(const std::string& hex, unsigned char* out, size_t out_len) {
     if (hex.size() != out_len * 2) return false;
     for (size_t i = 0; i < out_len; ++i) {
         unsigned int byte;
-        std::istringstream iss(hex.substr(i * 2, 2));
-        iss >> std::hex >> byte;
-        if (iss.fail()) return false;
+        sscanf(hex.substr(i*2, 2).c_str(), "%02x", &byte);
         out[i] = static_cast<unsigned char>(byte);
     }
     return true;
 }
 
 // ============================================================
-// Interactive Menu
+// Background Fetcher Thread
 // ============================================================
+void fetcher_thread(ScreenInteractive* screen) {
+    while (keep_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        
+        if (my_username.empty()) continue; // Not logged in yet
+        
+        std::string my_tag = to_hex(sha256_hash(my_username).data(), 32);
+        std::string url = msgserver_url + "/fetch?tag=" + my_tag;
+        std::string resp = tor_get(url);
+        
+        if (resp.empty()) continue;
+        
+        try {
+            auto j = nlohmann::json::parse(resp);
+            if (j["status"] != "ok") continue;
+            auto& messages = j["messages"];
+            
+            for (auto& msg : messages) {
+                std::string event_id = msg["event_id"];
+                std::string blob = msg["blob"];
+                
+                // 1. Is it an Ephemeral Handshake?
+                try {
+                    auto j_blob = nlohmann::json::parse(blob);
+                    if (j_blob.contains("type") && j_blob["type"] == "handshake") {
+                        HandshakePayload hs = json_to_handshake(j_blob.dump());
+                        std::string inner_payload = process_ephemeral_handshake(my_keypair.x25519_private, hs);
+                        
+                        if (!inner_payload.empty()) {
+                            auto inner = nlohmann::json::parse(inner_payload);
+                            std::string sender = inner["sender"];
+                            std::string kyber_ct_b64 = inner["kyber_ciphertext"];
+                            
+                            // Auto-fetch sender keys
+                            std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, sender);
+                            if (!pub_keys_json.empty()) {
+                                auto pj = nlohmann::json::parse(pub_keys_json);
+                                unsigned char their_x25519[32];
+                                from_hex(pj["x25519"], their_x25519, 32);
+                                
+                                std::vector<unsigned char> kyber_ct(1088);
+                                size_t b64_len = 0;
+                                sodium_base642bin(kyber_ct.data(), kyber_ct.size(), kyber_ct_b64.c_str(), kyber_ct_b64.size(), nullptr, &b64_len, nullptr, sodium_base64_VARIANT_ORIGINAL);
+                                
+                                current_session = create_session_responder(my_keypair, their_x25519, kyber_ct);
+                                has_session = true;
+                                peer_username = sender;
+                                
+                                std::lock_guard<std::mutex> lock(chat_mutex);
+                                chat_history.push_back("[SYSTEM] [+] Secure 0-RTT session established with " + sender);
+                            }
+                            // ACK Handshake
+                            nlohmann::json ack; ack["event_id"] = event_id;
+                            tor_post(msgserver_url + "/ack", ack.dump());
+                        }
+                        continue;
+                    }
+                } catch(...) {}
 
-static void print_menu() {
-    std::cout << "\n";
-    std::cout << "  +------------------------------------+\n";
-    std::cout << "  |           s h u s h h h            |\n";
-    std::cout << "  |     paranoid pendrive messenger     |\n";
-    std::cout << "  +------------------------------------+\n";
-    std::cout << "  |  1. Generate keypair                |\n";
-    std::cout << "  |  2. Create session                  |\n";
-    std::cout << "  |  3. Send message                    |\n";
-    std::cout << "  |  4. Fetch messages                  |\n";
-    std::cout << "  |  5. Run full crypto test            |\n";
-    std::cout << "  |  6. Exit                            |\n";
-    std::cout << "  +------------------------------------+\n";
-    std::cout << "  > ";
+                // 2. Standard Message
+                if (has_session) {
+                    EncryptedMessage enc_msg = json_to_encrypted(blob);
+                    std::string plaintext = session_decrypt(current_session, enc_msg);
+                    if (!plaintext.empty()) {
+                        std::lock_guard<std::mutex> lock(chat_mutex);
+                        chat_history.push_back(peer_username + "> " + plaintext);
+                        
+                        nlohmann::json ack; ack["event_id"] = event_id;
+                        tor_post(msgserver_url + "/ack", ack.dump());
+                    }
+                }
+            }
+            if (!messages.empty() && screen) {
+                screen->PostEvent(Event::Custom); // Force UI redraw
+            }
+        } catch (...) {}
+    }
 }
 
+// ============================================================
+// Main UI Application
+// ============================================================
 int main() {
-    // F-01: libsodium must initialize before anything else
-    if (!crypto_init()) {
-        std::cerr << "[-] Fatal: cannot continue without libsodium\n";
-        return 1;
-    }
-
-    // Initialize libcurl globally
+    if (!crypto_init()) return 1;
     curl_global_init(CURL_GLOBAL_DEFAULT);
-
-    std::cout << "[*] Initializing shushhh client...\n";
-
-    if (!is_tor_running()) {
-        std::cout << "[*] Tor daemon not found on port 9050. Attempting to launch background Tor...\n";
-        if (launch_tor_silently()) {
-            std::cout << "[*] Background Tor launched. Waiting for it to bind port 9050...\n";
-            int retries = 30; // up to 15 seconds
-            while (!is_tor_running() && retries > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                retries--;
-            }
-            if (is_tor_running()) {
-                std::cout << "[+] Tor successfully bound to port 9050.\n";
-            } else {
-                std::cerr << "[-] Tor failed to bind within the timeout. Ensure tor.exe is functional.\n";
-            }
-        } else {
-            std::cerr << "[-] Could not find or launch tor.exe. You will need to run Tor manually.\n";
-        }
-    } else {
-        std::cout << "[+] Tor daemon detected on port 9050.\n";
-    }
-
-    // ================================================================
-    // F-11: Launch watchdog — monitors USB and wipes on disconnect
-    // ================================================================
+    
+    // Auto-Tor
+    if (!is_tor_running()) launch_tor_silently();
+    
     char usb_drive = detect_usb_drive();
-    if (usb_drive != '\0') {
-        launch_watchdog(usb_drive);
-    }
+    if (usb_drive != '\0') launch_watchdog(usb_drive);
+    
+    auto screen = ScreenInteractive::Fullscreen();
+    
+    // --- Styles ---
+    auto style_normal = color(Color::White) | bgcolor(Color::Black);
+    auto style_focus  = color(Color::Black) | bgcolor(Color::Blue);
+    auto input_opt    = InputOption();
+    input_opt.transform = [&](InputState state) {
+        return state.focused ? state.element | style_focus : state.element | style_normal;
+    };
+    
+    // --- State ---
+    enum AppState { INIT, CONFIG, LOGIN, REGISTER, SETUP, CHAT };
+    AppState current_state = INIT;
+    std::string ui_error = "";
+    
+    // --- Config Components ---
+    std::string input_ks = keyserver_url;
+    std::string input_ms = msgserver_url;
+    Component comp_ks = Input(&input_ks, "http://127.0.0.1:5000", input_opt);
+    Component comp_ms = Input(&input_ms, "http://127.0.0.1:5001", input_opt);
+    auto btn_save_cfg = Button(" Save & Back ", [&] {
+        if(!input_ks.empty()) keyserver_url = input_ks;
+        if(!input_ms.empty()) msgserver_url = input_ms;
+        current_state = INIT;
+    });
+    auto config_container = Container::Vertical({comp_ks, comp_ms, btn_save_cfg});
 
-    // ================================================================
-    // F-08: Login / Registration flow
-    // ================================================================
-    std::string keyserver_url = "http://127.0.0.1:5000";
-    std::string msgserver_url = "http://127.0.0.1:5001";
+    // --- Init Components ---
+    auto btn_to_login = Button(" Login ", [&] { current_state = LOGIN; ui_error = ""; });
+    auto btn_to_reg = Button(" Register ", [&] { current_state = REGISTER; ui_error = ""; });
+    auto btn_to_cfg = Button(" Set Config ", [&] { current_state = CONFIG; });
+    auto btn_exit = Button(" Exit ", [&] { screen.Exit(); });
+    auto init_container = Container::Vertical({btn_to_login, btn_to_reg, btn_to_cfg, btn_exit});
 
-    std::cout << "\n";
-    std::cout << "  +------------------------------------+\n";
-    std::cout << "  |         Authentication             |\n";
-    std::cout << "  +------------------------------------+\n";
-    std::cout << "  |  1. Login                          |\n";
-    std::cout << "  |  2. Register new account           |\n";
-    std::cout << "  |  3. Skip (offline mode)            |\n";
-    std::cout << "  +------------------------------------+\n";
-
-    std::cout << "\n  Key Server URL (Enter for default " << keyserver_url << "): ";
-    std::string url_input;
-    std::getline(std::cin, url_input);
-    if (!url_input.empty()) keyserver_url = url_input;
-
-    std::cout << "  Msg Server URL (Enter for default " << msgserver_url << "): ";
-    std::getline(std::cin, url_input);
-    if (!url_input.empty()) msgserver_url = url_input;
-
-    std::cout << "  > ";
-    int auth_choice = 0;
-    std::cin >> auth_choice;
-    std::cin.ignore();
-
-    auto login = std::make_unique<PasswordLogin>();
-    bool authenticated = false;
-
-    switch (auth_choice) {
-    case 1: {
-        authenticated = login->authenticate(keyserver_url);
-        if (!authenticated) {
-            std::cerr << "[-] Authentication failed — continuing in offline mode\n";
-        }
-        break;
-    }
-    case 2: {
-        if (login->register_account(keyserver_url)) {
-            std::cout << "[+] Now logging in with the new account...\n";
-            authenticated = login->authenticate(keyserver_url);
-        }
-        break;
-    }
-    case 3:
-        std::cout << "[*] Offline mode — some features require server connection\n";
-        break;
-    default:
-        std::cout << "[*] Skipping authentication\n";
-        break;
-    }
-
-    // ================================================================
-    // Session state & Persistent Identity
-    // ================================================================
-    HybridKeyPair my_keypair;
-    bool has_keypair = false;
-
-    if (authenticated) {
-        if (login->load_identity(my_keypair, "identity.dat")) {
-            std::cout << "[+] Identity loaded securely from USB\n";
-            has_keypair = true;
+    // --- Login/Register Components ---
+    std::string input_user, input_pass;
+    Component comp_user = Input(&input_user, "username", input_opt);
+    Component comp_pass = Input(&input_pass, "password", input_opt);
+    
+    auto auth_action = [&](bool is_register) {
+        PasswordLogin login;
+        login.set_credentials(input_user, input_pass);
+        bool success = false;
+        
+        if (is_register) {
+            success = login.register_account(keyserver_url);
+            if (!success) ui_error = "[-] Registration failed";
         } else {
-            std::cout << "[*] Generating new persistent identity...\n";
-            my_keypair = generate_hybrid_keypair();
-            if (login->save_identity(my_keypair, "identity.dat")) {
-                std::cout << "[+] Identity saved securely to USB\n";
+            success = login.authenticate(keyserver_url);
+            if (!success) ui_error = "[-] Authentication failed";
+        }
+
+        if (success) {
+            my_username = input_user;
+            if (login.load_identity(my_keypair, "identity.dat")) {
                 has_keypair = true;
-                
-                // Upload to key server
+            } else {
+                my_keypair = generate_hybrid_keypair();
+                login.save_identity(my_keypair, "identity.dat");
+                has_keypair = true;
                 nlohmann::json pub_keys;
                 pub_keys["x25519"] = to_hex(my_keypair.x25519_public, 32);
                 pub_keys["kyber"] = to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
-                login->upload_public_keys(keyserver_url, pub_keys.dump());
-            } else {
-                std::cerr << "[-] Failed to save identity\n";
+                login.upload_public_keys(keyserver_url, pub_keys.dump());
             }
+            current_state = SETUP;
+            ui_error = "";
         }
+    };
+
+    auto btn_login = Button(" LOGIN ", [&] { auth_action(false); });
+    auto login_container = Container::Vertical({comp_user, comp_pass, btn_login});
+    
+    auto btn_register = Button(" REGISTER ", [&] { auth_action(true); });
+    auto register_container = Container::Vertical({comp_user, comp_pass, btn_register});
+    
+    // --- Setup Components ---
+    std::string input_peer;
+    Component comp_peer = Input(&input_peer, "target_username", input_opt);
+    auto btn_connect = Button(" CONNECT ", [&]() {
+        std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, input_peer);
+        if (pub_keys_json.empty()) {
+            ui_error = "[-] Peer not found";
+            return;
+        }
+        try {
+            auto j = nlohmann::json::parse(pub_keys_json);
+            unsigned char their_x[32]; from_hex(j["x25519"], their_x, 32);
+            std::vector<unsigned char> their_k(1184); from_hex(j["kyber"], their_k.data(), 1184);
+            
+            std::vector<unsigned char> kyber_ct;
+            current_session = create_session_initiator(my_keypair, their_x, their_k, kyber_ct);
+            has_session = true;
+            peer_username = input_peer;
+            
+            // Build 0-RTT Handshake
+            nlohmann::json inner;
+            inner["sender"] = my_username;
+            size_t b64_maxlen = sodium_base64_ENCODED_LEN(kyber_ct.size(), sodium_base64_VARIANT_ORIGINAL);
+            std::string ct_b64(b64_maxlen, '\0');
+            sodium_bin2base64(&ct_b64[0], b64_maxlen, kyber_ct.data(), kyber_ct.size(), sodium_base64_VARIANT_ORIGINAL);
+            inner["kyber_ciphertext"] = ct_b64.c_str();
+            
+            HandshakePayload hs = generate_ephemeral_handshake(their_x, inner.dump());
+            nlohmann::json outer;
+            outer["type"] = "handshake";
+            outer["ephemeral_public"] = to_base64(hs.ephemeral_public, 32);
+            outer["blob"] = nlohmann::json::parse(encrypted_to_json(hs.encrypted_blob));
+            
+            nlohmann::json drop;
+            drop["tag"] = to_hex(sha256_hash(peer_username).data(), 32);
+            drop["blob"] = outer.dump();
+            tor_post(msgserver_url + "/drop", drop.dump());
+            
+            current_state = CHAT;
+            std::lock_guard<std::mutex> lock(chat_mutex);
+            chat_history.push_back("[SYSTEM] [+] Handshake sent to " + peer_username);
+        } catch(...) { ui_error = "[-] Parse error"; }
+    });
+    auto btn_wait = Button(" WAIT FOR MESSAGES ", [&]() { current_state = CHAT; });
+    auto setup_container = Container::Vertical({comp_peer, btn_connect, btn_wait});
+    
+    // --- Chat Components ---
+    std::string input_msg;
+    Component comp_msg = Input(&input_msg, "Type message...", input_opt);
+    auto btn_send = Button(" SEND ", [&]() {
+        if (!has_session || input_msg.empty()) return;
+        EncryptedMessage enc = session_encrypt(current_session, input_msg);
+        nlohmann::json drop;
+        drop["tag"] = to_hex(sha256_hash(peer_username).data(), 32);
+        drop["blob"] = encrypted_to_json(enc);
+        tor_post(msgserver_url + "/drop", drop.dump());
+        
+        std::lock_guard<std::mutex> lock(chat_mutex);
+        chat_history.push_back(my_username + "> " + input_msg);
+        input_msg = "";
+    });
+    auto chat_container = Container::Horizontal({comp_msg, btn_send});
+    
+    // --- Renderer ---
+    auto main_container = Container::Tab({init_container, config_container, login_container, register_container, setup_container, chat_container}, (int*)&current_state);
+
+    auto renderer = Renderer(main_container, [&] {
+        if (current_state == INIT) {
+            return window(text(" [ MAIN MENU ] "), vbox({
+                btn_to_login->Render() | center,
+                btn_to_reg->Render() | center,
+                btn_to_cfg->Render() | center,
+                separator(),
+                btn_exit->Render() | center
+            })) | center | style_normal;
+        } else if (current_state == CONFIG) {
+            return window(text(" [ CONFIGURATION ] "), vbox({
+                text("Key Server URL:"), comp_ks->Render(),
+                text("Message Server URL:"), comp_ms->Render(),
+                separator(),
+                btn_save_cfg->Render() | center
+            })) | center | style_normal;
+        } else if (current_state == LOGIN || current_state == REGISTER) {
+            auto title = current_state == LOGIN ? " [ LOGIN ] " : " [ REGISTER ] ";
+            auto btn = current_state == LOGIN ? btn_login->Render() : btn_register->Render();
+            return window(text(title), vbox({
+                text("Username:"), comp_user->Render(),
+                text("Password:"), comp_pass->Render(),
+                separator(),
+                btn | center,
+                text(ui_error) | color(Color::Red)
+            })) | center | style_normal;
+        } else if (current_state == SETUP) {
+            return window(text(" [ SECURE ROUTING ] "), vbox({
+                text("Connect to Peer:"), comp_peer->Render(),
+                btn_connect->Render() | center,
+                separator(),
+                btn_wait->Render() | center,
+                text(ui_error) | color(Color::Red)
+            })) | center | style_normal;
+        } else {
+            Elements history_elements;
+            std::lock_guard<std::mutex> lock(chat_mutex);
+            for (const auto& msg : chat_history) {
+                if (msg.find(my_username + ">") == 0) {
+                    history_elements.push_back(text(msg) | color(Color::Green));
+                } else if (msg.find(peer_username + ">") == 0) {
+                    history_elements.push_back(text(msg) | color(Color::Cyan));
+                } else {
+                    history_elements.push_back(text(msg) | color(Color::GrayDark));
+                }
+            }
+            
+            return vbox({
+                text(" Status: SECURE | Identity: " + my_username + " | Peer: " + peer_username) | color(Color::Black) | bgcolor(Color::White),
+                window(text(" Chat History "), vbox(std::move(history_elements))) | flex,
+                hbox({ text(" [You]: "), comp_msg->Render() | flex, btn_send->Render() })
+            }) | style_normal;
+        }
+    });
+    
+    auto event_listener = CatchEvent(renderer, [&](Event event) {
+        if (event == Event::Escape || event == Event::Character((char)3)) { // Esc or Ctrl+C
+            screen.Exit();
+            return true;
+        }
+        return false;
+    });
+
+    // Start fetcher thread
+    std::thread fetcher(fetcher_thread, &screen);
+    
+    // Run UI
+    screen.Loop(event_listener);
+    
+    // Cleanup
+    keep_running = false;
+    fetcher.join();
+    
+    // Wipe keys
+    if (has_keypair) {
+        secure_wipe(my_keypair.x25519_private, 32);
+        secure_wipe(my_keypair.kyber_private.data(), my_keypair.kyber_private.size());
     }
-
-    MessageSession session;
-    bool has_session = false;
-
-    int choice = 0;
-
-    while (true) {
-        print_menu();
-        std::cin >> choice;
-        std::cin.ignore();
-
-        switch (choice) {
-
-        // -- Option 1: Generate keypair --
-        case 1: {
-            my_keypair = generate_hybrid_keypair();
-            has_keypair = true;
-            std::cout << "[+] Hybrid Keypair (X25519 + ML-KEM-768) generated\n";
-            std::cout << "    [X25519]: " << to_hex(my_keypair.x25519_public, 32) << "\n";
-            std::cout << "    [Kyber] : " << to_hex(my_keypair.kyber_public.data(), 16) << "... (" << my_keypair.kyber_public.size() << " bytes total)\n";
-            std::cout << "\n--- SHARE THIS ENTIRE STRING WITH YOUR PEER ---\n";
-            std::cout << to_hex(my_keypair.x25519_public, 32) 
-                      << to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size()) << "\n";
-            std::cout << "-----------------------------------------------\n";
-            std::cout << "    Recipient tag: " << compute_recipient_tag(my_keypair.x25519_public) << "\n";
-            // Private key is NEVER displayed — security invariant
-            break;
-        }
-
-        // -- Option 2: Create session --
-        case 2: {
-            if (!has_keypair) {
-                std::cerr << "[-] You need a keypair first (login to generate one)\n";
-                break;
-            }
-
-            std::cout << "[?] Are you the (1) Initiator or (2) Responder? ";
-            int role;
-            std::cin >> role;
-            std::cin.ignore();
-
-            if (role == 1) {
-                // Initiator Flow
-                std::cout << "Enter peer's username:\n> ";
-                std::string peer_username;
-                std::getline(std::cin, peer_username);
-
-                std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, peer_username);
-                if (pub_keys_json.empty()) {
-                    std::cerr << "[-] Could not fetch public keys for " << peer_username << " from Key Server.\n";
-                    break;
-                }
-
-                unsigned char their_x25519[32];
-                std::vector<unsigned char> their_kyber;
-
-                try {
-                    auto j = nlohmann::json::parse(pub_keys_json);
-                    std::string x_hex = j["x25519"];
-                    std::string k_hex = j["kyber"];
-
-                    if (!from_hex(x_hex, their_x25519, 32)) throw std::runtime_error("bad x25519 hex");
-                    
-                    their_kyber.resize(k_hex.size() / 2);
-                    if (!from_hex(k_hex, their_kyber.data(), their_kyber.size())) throw std::runtime_error("bad kyber hex");
-                } catch (...) {
-                    std::cerr << "[-] Failed to parse fetched public keys.\n";
-                    break;
-                }
-
-                std::vector<unsigned char> kyber_ciphertext;
-                session = create_session_initiator(my_keypair, their_x25519, their_kyber, kyber_ciphertext);
-                has_session = true;
-
-                std::cout << "\n--- SEND THIS ML-KEM-768 CIPHERTEXT TO THE RESPONDER ---\n";
-                std::cout << to_hex(kyber_ciphertext.data(), kyber_ciphertext.size()) << "\n";
-                std::cout << "----------------------------------------------------------\n";
-
-                secure_wipe(their_x25519, 32);
-                secure_wipe(their_kyber.data(), their_kyber.size());
-
-            } else if (role == 2) {
-                // Responder Flow
-                std::cout << "Enter initiator's username:\n> ";
-                std::string init_username;
-                std::getline(std::cin, init_username);
-
-                std::string pub_keys_json = PasswordLogin::fetch_public_keys(keyserver_url, init_username);
-                if (pub_keys_json.empty()) {
-                    std::cerr << "[-] Could not fetch public keys for " << init_username << " from Key Server.\n";
-                    break;
-                }
-
-                unsigned char their_x25519[32];
-                try {
-                    auto j = nlohmann::json::parse(pub_keys_json);
-                    std::string x_hex = j["x25519"];
-                    if (!from_hex(x_hex, their_x25519, 32)) throw std::runtime_error("bad x25519 hex");
-                } catch (...) {
-                    std::cerr << "[-] Failed to parse fetched public keys.\n";
-                    break;
-                }
-
-                std::cout << "Enter ML-KEM-768 ciphertext from initiator (" << 1088 * 2 << " hex chars):\n> ";
-                std::string ct_hex;
-                std::getline(std::cin, ct_hex);
-
-                std::vector<unsigned char> kyber_ct(1088); // ML-KEM-768 ciphertext is 1088 bytes
-                if (ct_hex.size() != 1088 * 2 || !from_hex(ct_hex, kyber_ct.data(), kyber_ct.size())) {
-                    std::cerr << "[-] Invalid ciphertext hex\n";
-                    break;
-                }
-
-                session = create_session_responder(my_keypair, their_x25519, kyber_ct);
-                has_session = true;
-
-                secure_wipe(their_x25519, 32);
-                secure_wipe(kyber_ct.data(), kyber_ct.size());
-            } else {
-                std::cerr << "[-] Invalid role\n";
-            }
-            break;
-        }
-
-        // -- Option 3: Send message --
-        case 3: {
-            if (!has_session) {
-                std::cerr << "[-] Create a session first (option 2)\n";
-                break;
-            }
-
-            std::cout << "Enter recipient's username for routing: ";
-            std::string recip_username;
-            std::getline(std::cin, recip_username);
-
-            std::cout << "Enter message: ";
-            std::string message;
-            std::getline(std::cin, message);
-
-            EncryptedMessage enc = session_encrypt(session, message);
-            std::string json_payload = encrypted_to_json(enc);
-
-            // Build the drop payload with routing tag (sha256 of username)
-            std::string drop_payload;
-            if (!recip_username.empty()) {
-                std::vector<unsigned char> tag_bytes = sha256_hash(recip_username);
-                std::string tag = to_hex(tag_bytes.data(), tag_bytes.size());
-                
-                nlohmann::json drop;
-                drop["tag"] = tag;
-                drop["blob"] = json_payload;
-                drop_payload = drop.dump();
-            } else {
-                std::cerr << "[-] Username cannot be empty.\n";
-                break;
-            }
-
-            std::cout << "[*] Encrypted payload (" << drop_payload.size() << " bytes)\n";
-
-            std::string url = msgserver_url + "/drop";
-            std::string resp = tor_post(url, drop_payload);
-            if (!resp.empty()) {
-                std::cout << "[+] Message sent\n";
-                std::cout << "    Server: " << resp << "\n";
-            }
-            break;
-        }
-
-        // -- Option 4: Fetch messages --
-        case 4: {
-            if (!has_keypair || !authenticated) {
-                std::cerr << "[-] You must be logged in to fetch messages.\n";
-                break;
-            }
-
-            std::string my_username = login->get_username();
-            std::vector<unsigned char> tag_bytes = sha256_hash(my_username);
-            std::string my_tag = to_hex(tag_bytes.data(), tag_bytes.size());
-
-            std::string url = msgserver_url + "/fetch?tag=" + my_tag;
-
-            std::cout << "[*] Fetching messages for " << my_username << " (tag: " << my_tag.substr(0, 16) << "...)\n";
-
-            std::string resp = tor_get(url);
-            if (resp.empty()) {
-                std::cerr << "[-] No response from server\n";
-                break;
-            }
-
-            try {
-                auto j = nlohmann::json::parse(resp);
-                if (j["status"] != "ok") {
-                    std::cerr << "[-] Server error: " << j.value("message", "unknown") << "\n";
-                    break;
-                }
-
-                auto& messages = j["messages"];
-                if (messages.empty()) {
-                    std::cout << "[*] No pending messages\n";
-                    break;
-                }
-
-                std::cout << "[+] " << messages.size() << " message(s) received:\n\n";
-
-                for (auto& msg : messages) {
-                    std::string event_id = msg["event_id"];
-                    std::string blob = msg["blob"];
-
-                    // Try to decrypt if we have a session
-                    if (has_session) {
-                        EncryptedMessage enc_msg = json_to_encrypted(blob);
-                        std::string plaintext = session_decrypt(session, enc_msg);
-
-                        if (!plaintext.empty()) {
-                            std::cout << "    [" << event_id.substr(0, 8) << "] "
-                                      << plaintext << "\n";
-                                      
-                            // ACK the message — hard-delete from server ONLY if successfully read
-                            nlohmann::json ack_payload;
-                            ack_payload["event_id"] = event_id;
-                            std::string ack_url = msgserver_url + "/ack";
-                            tor_post(ack_url, ack_payload.dump());
-                        } else {
-                            std::cout << "    [" << event_id.substr(0, 8)
-                                      << "] (could not decrypt — wrong session key or corrupted)\n";
-                        }
-                    } else {
-                        std::cout << "    [" << event_id.substr(0, 8)
-                                  << "] (encrypted — create session to decrypt)\n";
-                    }
-                }
-                std::cout << "\n[+] Finished processing inbox.\n";
-
-            } catch (const nlohmann::json::exception& e) {
-                std::cerr << "[-] Failed to parse fetch response: " << e.what() << "\n";
-            }
-            break;
-        }
-
-        // -- Option 5: Full crypto test --
-        case 5: {
-            FullCryptoTest();
-            break;
-        }
-
-        // -- Option 6: Exit --
-        case 6: {
-            std::cout << "[+] Wiping session state and exiting\n";
-
-            // Wipe all key material before exit
-            if (has_keypair) {
-                secure_wipe(my_keypair.x25519_private, 32);
-                secure_wipe(my_keypair.x25519_public, 32);
-                secure_wipe(my_keypair.kyber_private.data(), my_keypair.kyber_private.size());
-                secure_wipe(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
-            }
-            if (has_session) {
-                secure_wipe(session.my_keypair.x25519_private, 32);
-                secure_wipe(session.my_keypair.x25519_public, 32);
-                secure_wipe(session.my_keypair.kyber_private.data(), session.my_keypair.kyber_private.size());
-                secure_wipe(session.my_keypair.kyber_public.data(), session.my_keypair.kyber_public.size());
-                secure_wipe(session.their_x25519_public_key, 32);
-                secure_wipe(session.their_kyber_public_key.data(), session.their_kyber_public_key.size());
-                if (!session.root_key.empty())
-                    secure_wipe(session.root_key.data(), session.root_key.size());
-                if (!session.send_key.empty())
-                    secure_wipe(session.send_key.data(), session.send_key.size());
-                if (!session.recv_key.empty())
-                    secure_wipe(session.recv_key.data(), session.recv_key.size());
-            }
-
-            curl_global_cleanup();
-            std::cout << "[+] Clean exit — no key material in memory\n";
-            return 0;
-        }
-
-        default:
-            std::cerr << "[-] Invalid option\n";
-            break;
-        }
+    if (has_session) {
+        secure_wipe(current_session.send_key.data(), 32);
+        secure_wipe(current_session.recv_key.data(), 32);
+        secure_wipe(current_session.root_key.data(), 32);
     }
-
+    
     curl_global_cleanup();
     return 0;
 }

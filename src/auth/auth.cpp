@@ -155,7 +155,16 @@ static std::string read_password() {
 // PasswordLogin implementation
 // ============================================================
 
+void PasswordLogin::set_credentials(const std::string& u, const std::string& p) {
+    username_ = u;
+    std::string combined = p + username_;
+    credential_hash_ = sha256_hash(combined);
+    secure_wipe(&combined[0], combined.size());
+}
+
 void PasswordLogin::prompt_credentials() {
+    if (!credential_hash_.empty()) return; // Already set by UI
+
     std::cout << "Username: ";
     std::getline(std::cin, username_);
 
@@ -198,11 +207,11 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
     auth_payload["credential_hash"] = hash_b64;
 
     std::string url = server_url + "/auth";
-    std::cout << "[*] Authenticating with server...\n";
+    // std::cout << "[*] Authenticating with server...\n";
 
     std::string response = tor_post(url, auth_payload.dump());
     if (response.empty()) {
-        std::cerr << "[-] Authentication failed — no response from server\n";
+        // std::cerr << "[-] Authentication failed — no response from server\n";
         return false;
     }
 
@@ -211,8 +220,8 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
         json resp = json::parse(response);
 
         if (!resp.contains("status") || resp["status"] != "ok") {
-            std::cerr << "[-] Authentication failed: "
-                      << resp.value("message", "unknown error") << "\n";
+            // std::cerr << "[-] Authentication failed: "
+            //           << resp.value("message", "unknown error") << "\n";
             return false;
         }
 
@@ -228,7 +237,7 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
                                   sig_b64.c_str(), sig_b64.size(),
                                   nullptr, &sig_len, nullptr,
                                   sodium_base64_VARIANT_ORIGINAL) != 0) {
-                std::cerr << "[-] Failed to decode server signature\n";
+                // std::cerr << "[-] Failed to decode server signature\n";
                 return false;
             }
             sig.resize(sig_len);
@@ -242,22 +251,22 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
             );
 
             if (!valid) {
-                std::cerr << "[-] CRITICAL: Server signature verification FAILED\n";
-                std::cerr << "    Possible MITM attack — aborting authentication\n";
+                // std::cerr << "[-] CRITICAL: Server signature verification FAILED\n";
+                // std::cerr << "    Possible MITM attack — aborting authentication\n";
                 return false;
             }
-            std::cout << "[+] Server Ed25519 signature verified\n";
+            // std::cout << "[+] Server Ed25519 signature verified\n";
 
             auth_token_ = payload;
             auth_signature_ = sig_b64;
         }
 
         authenticated_ = true;
-        std::cout << "[+] Authentication successful\n";
+        // std::cout << "[+] Authentication successful\n";
         return true;
 
     } catch (const json::exception& e) {
-        std::cerr << "[-] Failed to parse auth response: " << e.what() << "\n";
+        // std::cerr << "[-] Failed to parse auth response: " << e.what() << "\n";
         return false;
     }
 }
@@ -280,26 +289,26 @@ bool PasswordLogin::register_account(const std::string& server_url) {
     reg_payload["credential_hash"] = hash_b64;
 
     std::string url = server_url + "/register";
-    std::cout << "[*] Registering account...\n";
+    // std::cout << "[*] Registering account...\n";
 
     std::string response = tor_post(url, reg_payload.dump());
     if (response.empty()) {
-        std::cerr << "[-] Registration failed — no response from server\n";
+        // std::cerr << "[-] Registration failed — no response from server\n";
         return false;
     }
 
     try {
         json resp = json::parse(response);
         if (resp.contains("status") && resp["status"] == "ok") {
-            std::cout << "[+] Registration successful\n";
+            // std::cout << "[+] Registration successful\n";
             return true;
         } else {
-            std::cerr << "[-] Registration failed: "
-                      << resp.value("message", "unknown error") << "\n";
+            // std::cerr << "[-] Registration failed: "
+            //           << resp.value("message", "unknown error") << "\n";
             return false;
         }
     } catch (const json::exception& e) {
-        std::cerr << "[-] Failed to parse registration response: " << e.what() << "\n";
+        // std::cerr << "[-] Failed to parse registration response: " << e.what() << "\n";
         return false;
     }
 }
@@ -316,7 +325,7 @@ bool PasswordLogin::upload_public_keys(const std::string& server_url, const std:
     upload_payload["public_keys"] = public_keys_json;
 
     std::string url = server_url + "/upload_key";
-    std::cout << "[*] Uploading public keys to Key Server...\n";
+    // std::cout << "[*] Uploading public keys to Key Server...\n";
 
     std::string response = tor_post(url, upload_payload.dump());
     if (response.empty()) return false;
@@ -324,10 +333,10 @@ bool PasswordLogin::upload_public_keys(const std::string& server_url, const std:
     try {
         json resp = json::parse(response);
         if (resp.contains("status") && resp["status"] == "ok") {
-            std::cout << "[+] Public keys successfully published to Key Server\n";
+            // std::cout << "[+] Public keys successfully published to Key Server\n";
             return true;
         } else {
-            std::cerr << "[-] Key upload failed: " << resp.value("message", "unknown") << "\n";
+            // std::cerr << "[-] Key upload failed: " << resp.value("message", "unknown") << "\n";
             return false;
         }
     } catch (...) {

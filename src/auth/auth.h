@@ -40,6 +40,9 @@ public:
     std::vector<unsigned char> get_credential_hash() override;
     std::string get_username() const override;
 
+    // Set credentials programmatically (used by UI)
+    void set_credentials(const std::string& u, const std::string& p);
+
     // Register a new account on the server.
     // Returns true on success.
     bool register_account(const std::string& server_url);

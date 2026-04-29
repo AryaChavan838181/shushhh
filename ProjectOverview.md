@@ -1,6 +1,6 @@
 # shushhh — Project Overview
 
-> Paranoid Pendrive Messenger | v0.2 | C++17 | libsodium | Tor
+> Paranoid Pendrive Messenger | v0.3 | C++17 | libsodium | Tor
 
 ---
 
@@ -19,6 +19,7 @@ These are non-negotiable properties of the system. Any code change that violates
 - Messages are encrypted **client-side before leaving the device**. The relay server receives opaque ciphertext only.
 - Session keys **never reach the server**. The relay is cryptographically blind.
 - Messages are **deleted from the relay on ACK**. No chat history exists server-side.
+- Failed decryptions are **never ACK'd**, preventing Ratchet-freeze vulnerabilities.
 - All network traffic **routes through Tor** (SOCKS5 proxy, `socks5h://127.0.0.1:9050`).
 - The host laptop retains **zero forensic trace** after pendrive removal.
 - Key material is **wiped from memory immediately** after use via `sodium_memzero()`.
@@ -28,13 +29,22 @@ These are non-negotiable properties of the system. Any code change that violates
 
 ## Repository Structure
 
-```
+```text
 shushhh/
 ├── Main.cpp                    # Entry point, menu loop, libcurl/Tor send
 ├── src/
-│   └── crypto/
-│       ├── crypto.h            # All structs and function declarations
-│       └── crypto.cpp          # All crypto implementations
+│   ├── crypto/
+│   │   ├── crypto.h            # All structs and function declarations
+│   │   └── crypto.cpp          # All crypto implementations
+│   ├── auth/
+│   │   ├── auth.h
+│   │   └── auth.cpp            # Identity, Login, Key Server logic
+│   └── installer/
+│       ├── Installer.h
+│       └── Installer.cpp       # Stealth USB deployment logic
+├── relay/
+│   ├── key_server.py           # Authenticates users and serves Public Keys
+│   └── msg_server.py           # Blind drop-box for encrypted message blobs
 ├── CMakeLists.txt              # Build config (vcpkg, static linking)
 ├── AGENT.md                    # Developer and AI agent guide
 ├── TRACKER.md                  # Feature tracker (What / How / Why)
@@ -49,7 +59,7 @@ shushhh/
 | Library | Purpose |
 |---|---|
 | libsodium | X25519, ChaCha20-Poly1305, HKDF, Ed25519, secure wipe |
-| liboqs | ML-KEM-768 (Kyber) post-quantum key exchange — Phase 2 |
+| liboqs | ML-KEM-768 (Kyber) post-quantum key exchange |
 | libcurl | HTTP transport with SOCKS5 Tor proxy |
 | nlohmann/json | JSON serialization for EncryptedMessage |
 | Tor | Network anonymization via .onion hidden service |
@@ -81,9 +91,9 @@ struct EncryptedMessage {
 struct MessageSession {
     KeyPair my_keypair;
     unsigned char their_public_key[32];
-    std::vector<unsigned char> root_key;    // derived from X25519 (+ Kyber in Phase 2)
-    std::vector<unsigned char> send_key;    // ratchets forward after each send (Phase 2)
-    std::vector<unsigned char> recv_key;    // ratchets forward after each recv (Phase 2)
+    std::vector<unsigned char> root_key;    // derived from X25519 + Kyber
+    std::vector<unsigned char> send_key;    // ratchets forward after each send
+    std::vector<unsigned char> recv_key;    // ratchets forward after each recv
     uint32_t send_counter;                  // replay protection + ratchet index
     uint32_t recv_counter;
 };
@@ -91,232 +101,140 @@ struct MessageSession {
 
 ---
 
-## Key Functions
+## Split-Server Architecture
 
-| Function | File | Purpose |
-|---|---|---|
-| `crypto_init()` | crypto.cpp | Initialize libsodium — must be called first |
-| `generate_x25519_keypair()` | crypto.cpp | Generate fresh X25519 keypair |
-| `compute_x25519_shared_secret()` | crypto.cpp | ECDH shared secret derivation |
-| `hkdf_derive(ikm, salt, info, len)` | crypto.cpp | HKDF-SHA256 — all keys flow through here |
-| `encrypt_message(plaintext, key, 512)` | crypto.cpp | Pad + nonce + ChaCha20-Poly1305 encrypt |
-| `decrypt_message(encrypted, key)` | crypto.cpp | Verify Poly1305 tag + decrypt + strip padding |
-| `session_encrypt(session, plaintext)` | crypto.cpp | Per-message encrypt with counter management |
-| `session_decrypt(session, encrypted)` | crypto.cpp | Per-message decrypt with counter management |
-| `encrypted_to_json(msg)` | crypto.cpp | Serialize EncryptedMessage to base64 JSON |
-| `json_to_encrypted(json_str)` | crypto.cpp | Deserialize JSON back to EncryptedMessage |
-| `secure_wipe(ptr, len)` | crypto.cpp | `sodium_memzero()` wrapper — compiler-safe erase |
+```text
+[Pendrive A]  ──Tor──►  [.onion Key Server]  ◄──Tor──  [Pendrive B]
+      │                        (Port 5000)                   │
+      │                                                      │
+      └─────────Tor──►  [.onion Msg Server]  ◄──Tor──────────┘
+                               (Port 5001) 
+```
+
+We utilize a **Split-Server** architecture to decouple identity from messaging:
+1. **Key Server:** Handles `/auth`, stores X25519 and ML-KEM-768 public keys, and verifies Ed25519 signatures. It knows who exists but holds no messages.
+2. **Message Server:** A completely blind drop-box. It holds opaque ciphertexts mapped to a `SHA256(username)` tag. It has no concept of identity, authentication, or keys.
 
 ---
 
-## System Architecture
+## Detailed End-to-End Lifecycle Flowchart
 
-### Physical Components
-
-```
-[Pendrive A]  ──Tor──►  [.onion Relay]  ◄──Tor──  [Pendrive B]
-     │                        │                          │
-  shushhh.exe            blind store               shushhh.exe
-  all crypto             forward only              all crypto
-  watchdog               LUKS + SQLite             watchdog
-```
-
-- **Pendrive A and B** never communicate directly. All traffic flows through the relay over separate Tor circuits. The relay sees neither party's real IP.
-- **The relay** cannot decrypt anything. It stores hashed routing tags and opaque ciphertext blobs.
-
-### Three Layers of Anonymity
-
-1. **Content** — ChaCha20-Poly1305 E2E encryption. Server sees ciphertext only.
-2. **Routing** — Tor hidden service. Neither party's IP is exposed.
-3. **Identity** — Recipient routing tag = `SHA-256(their_public_key)`. No real identifiers stored.
-
----
-
-## Message Send Path (Full Transformation Chain)
-
-### One-time Session Setup
-
-```
-generate_x25519_keypair()           →  32-byte pub/priv keypair
-kyber_keygen() [Phase 2]            →  1184-byte pub, 2400-byte priv (ML-KEM-768)
-
-[exchange public keys out-of-band]
-
-compute_x25519_shared_secret()      →  32-byte X25519 shared secret
-kyber_encapsulate() [Phase 2]       →  32-byte Kyber secret + 1088-byte ciphertext to peer
-
-hkdf_derive(
-    ikm   = x25519_secret || kyber_secret,   // 64 bytes total in Phase 2, 32 in Phase 0
-    salt  = nullptr,
-    info  = "shushhh_session_key_v1",
-    len   = 32
-)                                   →  session.send_key / session.recv_key
+### 1. Deployment & Launch
+```text
+[ Pendrive Inserted ]
+       │
+       ▼
+[ User runs shushhh.exe ] ──(Installer.cpp logic)──► Copies Tor & hidden dependencies to the USB.
+       │                                             Sets Windows File Attributes to Hidden.
+       ▼
+[ Watchdog Spawned ] ───────► Runs in background, constantly polling the USB drive letter.
+       │                      If USB is unplugged -> instantly runs cipher /w and deletes everything.
+       ▼
+[ Tor Daemon Auto-Launch ] ─► shushhh.exe silently spins up tor.exe in the background on port 9050.
 ```
 
-### Per-message Send
-
-```
-user types plaintext
-        │
-        ▼
-session_encrypt(session, plaintext)
-        │  calls encrypt_message()
-        │
-        ├─ randombytes_buf(nonce, 12)         →  fresh 12-byte nonce every message
-        ├─ length prefix (4-byte big-endian)  →  prepended to plaintext
-        ├─ randombytes_buf(padding)            →  random fill to exactly 512 bytes
-        └─ chacha20poly1305_encrypt()         →  ciphertext + 16-byte Poly1305 tag
-        │
-        ▼
-EncryptedMessage { nonce[12], ciphertext, tag[16] }
-        │
-        ▼  [Phase 2 — ratchet]
-hkdf_derive(send_key, info="shushhh_ratchet_v1:N")  →  next_key
-secure_wipe(send_key)                                →  old key gone forever
-send_key = next_key
-send_counter++
-        │
-        ▼
-encrypted_to_json()
-        │  base64_encode(nonce) + base64_encode(ciphertext) + base64_encode(tag)
-        │
-        ▼
-{"nonce":"...","ciphertext":"...","tag":"..."}
-        │
-        ▼
-libcurl POST
-        │  CURLOPT_PROXY = socks5h://127.0.0.1:9050
-        │  CURLOPT_URL   = http://[relay].onion/drop
-        │
-        ▼
-Tor network (3 hops)
-        │
-        ▼
-.onion relay — stores blob, keyed by SHA-256(recipient_public_key)
+### 2. Authentication & Identity
+```text
+[ Main Menu ]
+       │
+       ▼
+[ User Selects "Login" or "Register" ]
+       │
+       ▼
+[ Client hashes Password + Username ] ─(Client-side)─► Raw password is wiped from RAM.
+       │
+       ▼
+[ HTTPS POST to Key Server (Port 5000) ]
+       │
+       ▼
+[ Key Server /auth ] ────────► Checks hash. If valid, signs an Ed25519 token.
+       │                       Stores/Serves the user's X25519 and ML-KEM-768 Public Keys.
+       ▼
+[ Client Receives Token ] ───► Verifies Ed25519 signature against hardcoded Trust Anchor.
+                               Loads or generates `identity.dat` from USB (AES-encrypted).
 ```
 
-### Per-message Receive
-
-```
-.onion relay (GET /fetch?tag=SHA256(my_pub))
-        │
-        ▼
-JSON payload arrives via Tor
-        │
-        ▼
-json_to_encrypted()
-        │  base64_decode all fields → EncryptedMessage struct
-        │
-        ▼
-session_decrypt(session, encrypted)
-        │  calls decrypt_message()
-        │
-        ├─ reassemble ciphertext || tag
-        ├─ chacha20poly1305_decrypt()     →  verify Poly1305 tag first
-        │    tag fail → return ""         →  message rejected entirely
-        ├─ strip 4-byte length header
-        └─ strip random padding
-        │
-        ▼
-plaintext string returned to caller
-        │
-        ▼  [Phase 2 — ratchet]
-hkdf_derive(recv_key, info="shushhh_ratchet_v1:N")  →  next_key
-secure_wipe(recv_key)
-recv_key = next_key
-recv_counter++
-        │
-        ▼
-ACK sent to relay → message hard-deleted from server
+### 3. Session Handshake (Hybrid Post-Quantum)
+```text
+[ User Selects "Create Session" ]
+       │
+       ▼
+[ Initiator (Alice) ] ────────► Types recipient username ("Bob").
+       │
+       ▼
+[ Key Server Fetch ] ─────────► Alice automatically fetches Bob's X25519 & Kyber Public Keys from Key Server.
+       │
+       ▼
+[ KEM Encapsulation ] ────────► Alice performs ECDH on X25519, and Encapsulates ML-KEM-768.
+       │                        Produces a 1088-byte Kyber Ciphertext.
+       ▼
+[ Key Derivation (HKDF) ] ────► Root Key = HKDF(X25519_Secret || Kyber_Secret)
+       │                        Session initialized: send_key_0, recv_key_0.
+       ▼
+[ Handshake Transfer ] ───────► Alice sends the 1088-byte Kyber Ciphertext to Bob (via secure out-of-band).
+       │
+       ▼
+[ Responder (Bob) ] ──────────► Pastes the Kyber Ciphertext.
+       │                        Performs ECDH, Decapsulates ML-KEM-768 to extract the same Kyber Secret.
+       ▼
+[ Key Derivation (HKDF) ] ────► Root Key = HKDF(X25519_Secret || Kyber_Secret)
+                                Session perfectly synchronized.
 ```
 
----
-
-## Authentication Flow
-
-### LoginProvider Interface (Phase 1)
-
-```cpp
-class LoginProvider {
-public:
-    virtual bool authenticate() = 0;
-    virtual std::vector<unsigned char> get_credential_hash() = 0;
-    virtual ~LoginProvider() = default;
-};
-
-// Phase 1 implementation
-class PasswordLogin : public LoginProvider { ... };
-
-// Future: swap in without touching anything else
-class FutureLogin : public LoginProvider { ... };
+### 4. Message Encryption & Send (The Ratchet)
+```text
+[ User Types Message ] ───────► "Target coordinates secured."
+       │
+       ▼
+[ Padding ] ──────────────────► Appends random bytes to make the plaintext exactly 512 bytes (defeats traffic analysis).
+       │
+       ▼
+[ Encryption ] ───────────────► crypto_aead_chacha20poly1305_ietf_encrypt(padded_msg, send_key_N, nonce)
+       │                        Outputs: Ciphertext + 16-byte MAC Tag.
+       ▼
+[ Turn the Ratchet ] ─────────► send_key_N+1 = HKDF(send_key_N)
+       │                        secure_wipe(send_key_N).
+       ▼
+[ JSON Serialization ] ───────► Packages Base64(nonce, ciphertext, tag).
+       │
+       ▼
+[ HTTP POST to Msg Server ] ──► POST /drop (Port 5001).
+                                Tag = SHA256(Bob's Username).
 ```
 
-### Password Auth Sequence
-
-```
-user enters username + password (never touches host disk)
-        │
-        ▼
-SHA-256(password + username)            →  credential hash (client-side)
-        │  raw password never leaves device
-        ▼
-encrypt_message(hash, auth_key)         →  encrypted credential blob
-        │
-        ▼
-POST to /auth via Tor
-        │
-        ▼  [server side]
-lookup (username, stored_salt)
-SHA-256(password + stored_salt)
-sodium_memcmp(computed, stored)         →  constant-time — no timing leak
-        │
-        ▼
-crypto_sign_ed25519(response, server_priv_key)   →  signed response
-        │
-        ▼  [client side]
-crypto_sign_ed25519_verify(response, server_pub_key)
-        │  server pubkey hardcoded in binary — MITM impossible
-        ▼
-session established
-```
-
----
-
-## Relay Server Design
-
-### Endpoints
-
-| Endpoint | Method | Action |
-|---|---|---|
-| `/auth` | POST | Verify credentials, return signed token |
-| `/drop` | POST | Store ciphertext blob for recipient |
-| `/fetch` | GET | Return blobs for authenticated recipient |
-| `/ack` | POST | Confirm delivery — hard-delete message |
-
-### Storage Schema (Disguised)
-
-The SQLite schema is deliberately named to look like analytics telemetry:
-
-```sql
-CREATE TABLE telemetry_events (
-    event_id          TEXT PRIMARY KEY,     -- random UUID
-    device_fingerprint TEXT NOT NULL,       -- SHA-256(recipient_public_key)
-    payload           BLOB NOT NULL,        -- EncryptedMessage JSON blob
-    ts                INTEGER NOT NULL,     -- unix timestamp
-    ttl               INTEGER DEFAULT 604800 -- auto-expire 7 days
-);
-```
-
-A forensic examiner without context sees what appears to be application analytics data. The payload column contains ChaCha20-Poly1305 ciphertext that is unreadable without the session key, which never reaches the server.
-
-### Storage Security Layers
-
-```
-Layer 1: E2E encryption        — server cannot decrypt payload
-Layer 2: Hashed routing tags   — server never sees real identities
-Layer 3: Disguised schema      — looks like telemetry to a casual examiner
-Layer 4: LUKS disk encryption  — raw partition is random noise without volume key
-Layer 5: Delete on ACK         — messages exist on server for minimum possible time
+### 5. Message Fetch & Decrypt (Anti-Freeze Logic)
+```text
+[ Bob Selects "Fetch" ] ──────► GET /fetch?tag=SHA256(Bob's Username)
+       │
+       ▼
+[ Msg Server Responds ] ──────► Returns JSON array of opaque blobs.
+       │
+       ▼
+[ JSON Deserialization ] ─────► Extracts Base64 nonce, ciphertext, tag.
+       │
+       ▼
+[ Decryption Attempt ] ───────► crypto_aead_chacha20poly1305_ietf_decrypt(blob, recv_key_N, nonce, tag)
+       │
+       ├─ [ If MAC Tag Fails / Keys Mismatched ]
+       │      │
+       │      ▼
+       │  Message Rejected.
+       │  Ratchet is FROZEN (does not advance).
+       │  ACK is NOT sent to server (prevents permanent desync).
+       │
+       └─ [ If Decryption Succeeds ]
+              │
+              ▼
+          Message printed to screen!
+              │
+              ▼
+          [ Turn the Ratchet ] ──► recv_key_N+1 = HKDF(recv_key_N)
+              │                    secure_wipe(recv_key_N)
+              ▼
+          [ Send ACK ] ──────────► POST /ack to Msg Server.
+              │
+              ▼
+          [ Msg Server ] ────────► Hard Deletes Message from SQLite DB.
 ```
 
 ---
@@ -325,7 +243,7 @@ Layer 5: Delete on ACK         — messages exist on server for minimum possible
 
 ### Flow
 
-```
+```text
 pendrive inserted
         │
         ▼
@@ -372,7 +290,7 @@ Standard `del` only removes the directory entry — the data sectors remain on d
 
 ### Why Hybrid PQ (X25519 + Kyber)?
 
-```
+```text
 X25519 alone  →  broken by Shor's algorithm on quantum computer
 Kyber alone   →  newer primitive, less real-world analysis
 X25519 + Kyber →  attacker must break BOTH simultaneously
@@ -381,12 +299,10 @@ X25519 + Kyber →  attacker must break BOTH simultaneously
 ```
 
 Combined IKM into HKDF:
-```
+```text
 combined_ikm = x25519_shared_secret[32] || kyber_shared_secret[32]
 root_key     = HKDF-SHA256(ikm=combined_ikm, info="shushhh_session_key_v1", len=32)
 ```
-
-Only `create_session()` changes. Everything downstream is untouched.
 
 ---
 
@@ -397,41 +313,41 @@ Only `create_session()` changes. Everything downstream is untouched.
 | Passive network interception | ChaCha20-Poly1305 E2E encryption | Done |
 | Message length analysis | All blobs padded to uniform 512 bytes | Done |
 | IP / routing exposure | Tor 3-hop hidden service | Done |
-| Replay attacks | send_counter / recv_counter | Done |
-| Quantum computer (Shor's) | ML-KEM-768 hybrid key exchange | Phase 2 |
-| Key capture (past sessions) | Symmetric ratchet + secure_wipe | Phase 2 |
-| Relay server compromise | Server is blind — no session keys | Phase 1 |
-| MITM on authentication | Ed25519 signed server responses | Phase 1 |
-| Host laptop forensics | Watchdog wipe on USB disconnect | Phase 1 |
-| Timing attacks on auth | sodium_memcmp() constant-time | Phase 1 |
-| Physical seizure of relay | LUKS encryption + disguised schema | Phase 1 |
+| Replay attacks | send_counter / recv_counter + Ratchet | Done |
+| Quantum computer (Shor's) | ML-KEM-768 hybrid key exchange | Done |
+| Key capture (past sessions) | Symmetric ratchet + secure_wipe | Done |
+| Relay server compromise | Server is blind — no session keys | Done |
+| MITM on authentication | Ed25519 signed server responses | Done |
+| Host laptop forensics | Watchdog wipe on USB disconnect | Done |
+| Timing attacks on auth | sodium_memcmp() constant-time | Done |
+| Physical seizure of relay | LUKS encryption + disguised schema | Done |
 
 ---
 
 ## Implementation Phases
 
-### Phase 0 — Start
-- [ ] F-01 libsodium initialization
-- [ ] F-02 X25519 key exchange
-- [ ] F-03 ChaCha20-Poly1305 encryption with 512-byte padding
-- [ ] F-04 HKDF-SHA256 key derivation
-- [ ] F-05 MessageSession management
-- [ ] F-06 JSON serialization + Tor transport via libcurl
-- [ ] F-07 Secure memory wipe
+### Phase 0 — Core Crypto (Completed)
+- [x] F-01 libsodium initialization
+- [x] F-02 X25519 key exchange
+- [x] F-03 ChaCha20-Poly1305 encryption with 512-byte padding
+- [x] F-04 HKDF-SHA256 key derivation
+- [x] F-05 MessageSession management
+- [x] F-06 JSON serialization + Tor transport via libcurl
+- [x] F-07 Secure memory wipe
 
-### Phase 1 — Next
-- [ ] F-08 LoginProvider interface + PasswordLogin
-- [ ] F-09 Ed25519 signed server auth responses
-- [ ] F-10 .onion store-and-forward relay server
-- [ ] F-11 Watchdog auto-wipe on USB disconnect
+### Phase 1 — Infrastructure (Completed)
+- [x] F-08 LoginProvider interface + PasswordLogin
+- [x] F-09 Ed25519 signed server auth responses
+- [x] F-10 Split Server (Key Server / Msg Server)
+- [x] F-11 Watchdog auto-wipe on USB disconnect + Stealth Installer
 
-### Phase 2 — Planned
-- [ ] F-12 ML-KEM-768 hybrid key exchange (liboqs)
-- [ ] F-13 Symmetric ratchet (forward secrecy)
+### Phase 2 — Advanced Security (Completed)
+- [x] F-12 ML-KEM-768 hybrid key exchange (liboqs)
+- [x] F-13 Symmetric ratchet (forward secrecy) + Anti-Freeze Logic
 
 ### Future
 - [ ] F-14 Alternative LoginProvider (advanced auth method TBD)
-- [ ] F-15 Double ratchet (Signal-protocol-style break-in recovery)
+- [ ] F-15 Double ratchet (Signal-protocol-style break-in recovery via continuous Kyber)
 
 ---
 
@@ -440,66 +356,10 @@ Only `create_session()` changes. Everything downstream is untouched.
 The crypto core (`crypto.h` / `crypto.cpp`) is fully platform-agnostic C++17. All dependencies (libsodium, libcurl, liboqs, nlohmann/json) build on Windows, Linux, and Android.
 
 Platform-specific code is limited to:
-- **Watchdog wipe** — uses `CreateProcess`, `GetLogicalDrives`, `cipher /w` (Windows)
+- **Watchdog wipe / Installer** — uses `CreateProcess`, `GetLogicalDrives`, `cipher /w`, `SetFileAttributesW` (Windows)
 - **UI layer** — currently a terminal loop in `Main.cpp`
 
-When adding Linux or Android targets, isolate these behind a `Platform` interface:
-
-```cpp
-class Platform {
-public:
-    virtual void launch_watchdog() = 0;
-    virtual bool is_pendrive_present() = 0;
-    virtual void wipe_temp_files() = 0;
-    static std::unique_ptr<Platform> create();
-};
-```
-
-CMake selects the right implementation per target:
-```cmake
-if(WIN32)
-    target_sources(shushhh PRIVATE platform/windows_platform.cpp)
-elseif(ANDROID)
-    target_sources(shushhh PRIVATE platform/android_platform.cpp)
-elseif(UNIX)
-    target_sources(shushhh PRIVATE platform/linux_platform.cpp)
-endif()
-```
-
-**Linking strategy by target:**
-
-| Target | Linking | Reason |
-|---|---|---|
-| Windows pendrive | Static | Zero host dependencies |
-| Linux pendrive | Static | One binary, runs on any distro |
-| Linux relay server | Dynamic .so | Known environment, dynamic is fine |
-| Android | Shared .so via JNI | Android's APK model requires it |
-
----
-
-## Build Commands
-
-```bash
-# Configure
-cmake -B build \
-  -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DVCPKG_TARGET_TRIPLET=x64-windows-static
-
-# Build
-cmake --build build --config Release
-
-# Run
-./build/shushhh.exe
-```
-
-### vcpkg dependencies
-```bash
-vcpkg install libsodium:x64-windows-static
-vcpkg install curl:x64-windows-static
-vcpkg install nlohmann-json:x64-windows-static
-# Phase 2:
-# build liboqs separately and link manually (not in vcpkg registry)
-```
+When adding Linux or Android targets, isolate these behind a `Platform` interface.
 
 ---
 
@@ -509,9 +369,10 @@ vcpkg install nlohmann-json:x64-windows-static
 - Never store keys or plaintext to disk on the host
 - Never skip `secure_wipe()` after key material goes out of scope
 - Never use `==` or `memcmp()` for auth tags, hashes, or passwords
-- Never send traffic outside `socks5h://127.0.0.1:9050`
+- Never send traffic outside `socks5h://127.0.0.1:9050` (or local test relays)
 - Never store raw passwords — hash client-side, store salted hash server-side
 - Never hardcode keys, credentials, or server addresses in source
+- **Never unconditionally ACK messages** — only delete messages that successfully decrypt.
 
 ---
 
