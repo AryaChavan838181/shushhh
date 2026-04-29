@@ -207,11 +207,11 @@ void fetcher_thread(ScreenInteractive* screen) {
 Component StyledButton(const std::string& label, std::function<void()> on_click) {
     auto opt = ButtonOption::Ascii();
     opt.transform = [](const EntryState& s) {
-        auto el = text(s.label) | center;
+        auto el = text(s.label) | center | border;
         if (s.focused) {
             el = el | color(Color::Black) | bgcolor(Color::Blue) | bold;
         } else {
-            el = el | color(Color::White) | bgcolor(Color::Black) | border;
+            el = el | color(Color::White) | bgcolor(Color::Black);
         }
         return el;
     };
@@ -222,12 +222,10 @@ Component StyledButton(const std::string& label, std::function<void()> on_click)
 // Main UI Application
 // ============================================================
 int main() {
-    // --- Redirect stdout and stderr to log buffer ---
-    std::streambuf* orig_cout = std::cout.rdbuf(g_log_stream.rdbuf());
+    // --- Redirect stderr to log buffer (stdout is needed by FTXUI) ---
     std::streambuf* orig_cerr = std::cerr.rdbuf(g_log_stream.rdbuf());
 
     if (!crypto_init()) {
-        std::cout.rdbuf(orig_cout);
         std::cerr.rdbuf(orig_cerr);
         return 1;
     }
@@ -296,28 +294,30 @@ int main() {
         
         if (is_register) {
             success = login.register_account(keyserver_url);
-            if (!success) ui_error = "[-] Registration failed";
+            if (!success) { ui_error = "[-] Registration failed"; return; }
+            // After registering, also authenticate to get auth token for key upload
+            success = login.authenticate(keyserver_url);
+            if (!success) { ui_error = "[-] Registered but login failed"; return; }
         } else {
             success = login.authenticate(keyserver_url);
-            if (!success) ui_error = "[-] Authentication failed";
+            if (!success) { ui_error = "[-] Authentication failed"; return; }
         }
 
-        if (success) {
-            my_username = input_user;
-            if (login.load_identity(my_keypair, "identity.dat")) {
-                has_keypair = true;
-            } else {
-                my_keypair = generate_hybrid_keypair();
-                login.save_identity(my_keypair, "identity.dat");
-                has_keypair = true;
-                nlohmann::json pub_keys;
-                pub_keys["x25519"] = to_hex(my_keypair.x25519_public, 32);
-                pub_keys["kyber"] = to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
-                login.upload_public_keys(keyserver_url, pub_keys.dump());
-            }
-            current_state = SETUP;
-            ui_error = "";
+        // If we reach here, authentication succeeded
+        my_username = input_user;
+        if (login.load_identity(my_keypair, "identity.dat")) {
+            has_keypair = true;
+        } else {
+            my_keypair = generate_hybrid_keypair();
+            login.save_identity(my_keypair, "identity.dat");
+            has_keypair = true;
+            nlohmann::json pub_keys;
+            pub_keys["x25519"] = to_hex(my_keypair.x25519_public, 32);
+            pub_keys["kyber"] = to_hex(my_keypair.kyber_public.data(), my_keypair.kyber_public.size());
+            login.upload_public_keys(keyserver_url, pub_keys.dump());
         }
+        current_state = SETUP;
+        ui_error = "";
     };
 
     auto btn_login = StyledButton("     LOGIN      ", [&] { auth_action(false); });
@@ -580,8 +580,7 @@ int main() {
     keep_running = false;
     fetcher.join();
     
-    // Restore streams
-    std::cout.rdbuf(orig_cout);
+    // Restore stderr
     std::cerr.rdbuf(orig_cerr);
     
     // Wipe keys

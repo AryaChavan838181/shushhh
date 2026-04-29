@@ -19,7 +19,7 @@ bool crypto_init() {
         std::cerr << "[-] Fatal: sodium_init() failed — cannot proceed without CSPRNG\n";
         return false;
     }
-    std::cout << "[+] libsodium initialized successfully\n";
+    std::cerr << "[+] libsodium initialized successfully\n";
     return true;
 }
 
@@ -357,7 +357,7 @@ MessageSession create_session_initiator(
     secure_wipe(kyber_secret.data(), kyber_secret.size());
     secure_wipe(ikm.data(), ikm.size());
 
-    std::cout << "[+] Session created (Initiator) — hybrid keys derived, counters initialized\n";
+    std::cerr << "[+] Session created (Initiator) — hybrid keys derived, counters initialized\n";
     return session;
 }
 
@@ -417,7 +417,7 @@ MessageSession create_session_responder(
     secure_wipe(kyber_secret.data(), kyber_secret.size());
     secure_wipe(ikm.data(), ikm.size());
 
-    std::cout << "[+] Session created (Responder) — hybrid keys derived, counters initialized\n";
+    std::cerr << "[+] Session created (Responder) — hybrid keys derived, counters initialized\n";
     return session;
 }
 
