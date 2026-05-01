@@ -80,7 +80,17 @@ bool extract_resource(int resource_id, const std::string& output_path) {
     
     // Ensure parent directories exist
     fs::path p(output_path);
-    if (p.has_parent_path()) fs::create_directories(p.parent_path());
+    if (p.has_parent_path()) {
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+    }
+    
+    // Clear hidden/system/readonly attributes if the file already exists,
+    // otherwise std::ofstream will fail to open it with Access Denied.
+    if (fs::exists(p)) {
+        std::wstring w(output_path.begin(), output_path.end());
+        SetFileAttributesW(w.c_str(), FILE_ATTRIBUTE_NORMAL);
+    }
     
     std::ofstream out(output_path, std::ios::binary);
     if (!out) return false;
@@ -93,24 +103,17 @@ bool has_resource(int resource_id) {
 }
 
 // ============================================================
-// Hide file (Windows)
-// ============================================================
-void hide_file(const std::string& filepath) {
-    std::wstring w(filepath.begin(), filepath.end());
-    DWORD attr = GetFileAttributesW(w.c_str());
-    if (attr != INVALID_FILE_ATTRIBUTES)
-        SetFileAttributesW(w.c_str(), attr | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
-}
-
-// ============================================================
 // Styled Button
 // ============================================================
 Component StyledButton(const std::string& label, std::function<void()> on_click) {
     auto opt = ButtonOption::Ascii();
     opt.transform = [](const EntryState& s) {
         auto el = text(s.label) | center | border;
-        if (s.focused) el = el | color(Color::Black) | bgcolor(Color::Blue) | bold;
-        else           el = el | color(Color::White) | bgcolor(Color::Black);
+        if (s.focused) {
+            el = el | color(Color::Black) | bgcolor(Color::Blue) | bold;
+        } else {
+            el = el | color(Color::White) | bgcolor(Color::Black);
+        }
         return el;
     };
     return Button(label, std::move(on_click), opt);
@@ -149,6 +152,7 @@ int main() {
     auto drive_radio = Radiobox(&drive_names, &selected, radio_opt);
     
     auto do_install = [&]() {
+        error_msg = ""; // Clear any previous error messages
         if (drives.empty()) { error_msg = "No drives detected!"; state = ERR; return; }
         if (!has_shushhh) { error_msg = "shushhh.exe not embedded in installer!"; state = ERR; return; }
         
@@ -162,7 +166,7 @@ int main() {
         logs.push_back("[*] Extracting shushhh.exe...");
         std::string dest_shushhh = root + "shushhh.exe";
         if (!extract_resource(IDR_SHUSHHH_EXE, dest_shushhh)) {
-            error_msg = "Failed to extract shushhh.exe"; state = ERR; return;
+            error_msg = "Failed to extract shushhh.exe (Is it currently running?)"; state = ERR; return;
         }
         logs.push_back("[+] shushhh.exe extracted");
         
@@ -171,9 +175,24 @@ int main() {
             logs.push_back("[*] Extracting tor.exe...");
             std::string dest_tor = root + "tor\\tor\\tor.exe";
             if (extract_resource(IDR_TOR_EXE, dest_tor)) {
-                hide_file(root + "tor");
-                hide_file(dest_tor);
-                logs.push_back("[+] tor.exe extracted & hidden");
+                logs.push_back("[+] tor.exe extracted");
+                
+                // Extract Tor data files
+                if (has_resource(IDR_TOR_GEOIP)) {
+                    logs.push_back("[*] Extracting geoip...");
+                    if (extract_resource(IDR_TOR_GEOIP, root + "tor\\data\\geoip"))
+                        logs.push_back("[+] geoip extracted");
+                    else
+                        logs.push_back("[-] Failed to extract geoip");
+                }
+                
+                if (has_resource(IDR_TOR_GEOIP6)) {
+                    logs.push_back("[*] Extracting geoip6...");
+                    if (extract_resource(IDR_TOR_GEOIP6, root + "tor\\data\\geoip6"))
+                        logs.push_back("[+] geoip6 extracted");
+                    else
+                        logs.push_back("[-] Failed to extract geoip6");
+                }
             } else {
                 logs.push_back("[-] Failed to extract tor.exe");
             }
@@ -183,7 +202,6 @@ int main() {
         
         logs.push_back("");
         logs.push_back("[+] USB preparation complete!");
-        logs.push_back("[+] Only shushhh.exe is visible on the drive.");
         state = DONE;
     };
     

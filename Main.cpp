@@ -77,14 +77,56 @@ static bool is_tor_running() {
     return running;
 }
 
+static std::string get_exe_dir() {
+    char buf[MAX_PATH];
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string path(buf);
+    auto pos = path.find_last_of("\\/");
+    return (pos != std::string::npos) ? path.substr(0, pos) : ".";
+}
+
 static bool launch_tor_silently() {
-    std::string tor_path = "tor.exe";
-    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor/tor.exe")) tor_path = "tor/tor/tor.exe";
-    if (!std::filesystem::exists(tor_path) && std::filesystem::exists("tor/tor.exe")) tor_path = "tor/tor.exe";
-    if (!std::filesystem::exists(tor_path)) return false;
+    std::string exe_dir = get_exe_dir();
+    
+    // Search for tor.exe relative to the executable's own directory
+    // USB layout: E:\shushhh.exe + E:\tor\tor\tor.exe
+    // Dev layout: ...\build\Release\shushhh.exe + ...\tor\tor\tor.exe
+    std::vector<std::string> search_paths = {
+        exe_dir + "\\tor.exe",
+        exe_dir + "\\tor\\tor\\tor.exe",
+        exe_dir + "\\tor\\tor.exe",
+        "tor\\tor\\tor.exe",     // fallback: CWD-relative
+        "tor\\tor.exe",
+        "tor.exe",
+    };
+    
+    std::string tor_path;
+    for (const auto& p : search_paths) {
+        if (std::filesystem::exists(p)) { tor_path = p; break; }
+    }
+    if (tor_path.empty()) return false;
+    
+    tor_path = std::filesystem::absolute(tor_path).string();
+    
+    // Use a dedicated temp directory so Tor doesn't hit permission errors
+    char temp_buf[MAX_PATH];
+    GetTempPathA(MAX_PATH, temp_buf);
+    std::string data_dir = std::string(temp_buf) + "shushhh_tor_data";
+    std::filesystem::create_directories(data_dir);
+    
+    std::string cmd = "\"" + tor_path + "\" --DataDirectory \"" + data_dir + "\"";
+    
+    // Explicitly provide GeoIP files if they exist (crucial for bootstrapping)
+    std::string geoip_path = exe_dir + "\\tor\\data\\geoip";
+    std::string geoip6_path = exe_dir + "\\tor\\data\\geoip6";
+    if (std::filesystem::exists(geoip_path)) cmd += " --GeoIPFile \"" + geoip_path + "\"";
+    if (std::filesystem::exists(geoip6_path)) cmd += " --GeoIPv6File \"" + geoip6_path + "\"";
+    
     STARTUPINFOA si; PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si); ZeroMemory(&pi, sizeof(pi));
-    if (!CreateProcessA(tor_path.c_str(), NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return false;
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     return true;
 }

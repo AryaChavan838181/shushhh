@@ -1,90 +1,105 @@
 <div align="center">
-  <pre style="color: #4169E1; font-weight: bold;">
+
+```
   ███████╗██╗  ██╗██╗   ██╗███████╗██╗  ██╗██╗  ██╗██╗  ██╗
   ██╔════╝██║  ██║██║   ██║██╔════╝██║  ██║██║  ██║██║  ██║
   ███████╗███████║██║   ██║███████╗███████║███████║███████║
   ╚════██║██╔══██║██║   ██║╚════██║██╔══██║██╔══██║██╔══██║
   ███████║██║  ██║╚██████╔╝███████║██║  ██║██║  ██║██║  ██║
   ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
-  </pre>
+```
 
-  <h3>Quantum-Safe Encrypted Messenger</h3>
+### Quantum-Safe · Anonymous · Portable USB Messenger
 
-  <p>
-    A high-security, anonymous, terminal-based messaging application featuring Post-Quantum Cryptography (ML-KEM-768) and Tor integration.
-  </p>
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 </div>
 
 ---
 
-## 🔒 Features
+## What is Shushhh?
 
-*   **Quantum-Safe Cryptography**: Utilizes a hybrid key exchange combining classical **X25519** and post-quantum **Kyber (ML-KEM-768)** to protect against "harvest now, decrypt later" attacks.
-*   **0-RTT End-to-End Encryption**: Fast, secure session establishment. All messages are encrypted with **XChaCha20-Poly1305** using a ratcheting protocol for forward secrecy.
-*   **Anonymous Routing (Tor)**: Built-in Tor integration hides your IP address and routes all traffic through the Tor network.
-*   **Self-Contained Portable USB**: Deploy `shushhh` to a USB drive. A built-in **Watchdog** monitors the drive; if the USB is yanked out, it instantly securely wipes all ephemeral data from the host machine using forensic wiping (`cipher /w`).
-*   **Ninja/Spy Aesthetic TUI**: A beautiful, high-contrast Terminal User Interface built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI).
+**Shushhh** is a terminal-based, end-to-end encrypted messenger built from scratch in C++17. It is designed to run entirely from a USB pen drive, leave zero forensic traces on the host machine, and resist both present-day attacks and future quantum computers.
 
-## 🛠️ Technology Stack
+Every message is encrypted with **ChaCha20-Poly1305**, keys are established via a **hybrid X25519 + ML-KEM-768 (Kyber)** handshake, and all traffic is routed through the **Tor** anonymity network.
 
-*   **C++17**: Core application logic and UI.
-*   **libsodium**: Classical cryptography (X25519, XChaCha20-Poly1305, Argon2, Ed25519).
-*   **liboqs**: Post-quantum cryptography (ML-KEM-768).
-*   **FTXUI**: Terminal UI framework.
-*   **Tor**: Embedded anonymous routing.
+## Features
 
-## 🚀 Getting Started
+| Feature | Detail |
+|---|---|
+| **Post-Quantum Hybrid Key Exchange** | X25519 (classical ECDH) + ML-KEM-768 (NIST post-quantum KEM) |
+| **AEAD Message Encryption** | ChaCha20-Poly1305 IETF with random padding |
+| **Forward Secrecy** | Symmetric ratchet — keys rotate after every message |
+| **0-RTT Sealed-Sender Handshake** | Ephemeral X25519 tunnel hides sender identity from relay |
+| **Anonymous Routing** | Embedded Tor — all HTTP traffic goes through SOCKS5 proxy |
+| **USB Watchdog** | Auto-wipe all traces if the pen drive is yanked out |
+| **Ed25519 Authenticated Server** | Hardcoded trust anchor prevents MITM on Key Server |
+| **Encrypted Identity File** | `identity.dat` encrypted with `SHA-256(password + username)` via ChaCha20-Poly1305 |
+| **Store-and-Forward Relay** | Cryptographically blind message server — sees only opaque blobs and hashed tags |
+| **TUI (Terminal UI)** | Full-screen FTXUI interface with debug overlay (`Alt+X`) |
+| **Self-Contained Installer** | Single `.exe` with `shushhh.exe` and `tor.exe` embedded as Win32 resources |
+
+## Technology Stack
+
+| Component | Library / Tool |
+|---|---|
+| Language | C++17, Python 3 (relay servers) |
+| Classical Crypto | [libsodium](https://doc.libsodium.org/) — X25519, ChaCha20-Poly1305, Ed25519, SHA-256, HMAC-SHA256, HKDF |
+| Post-Quantum Crypto | [liboqs](https://openquantumsafe.org/) — ML-KEM-768 (Kyber) |
+| Terminal UI | [FTXUI](https://github.com/ArthurSonzogni/FTXUI) |
+| HTTP Client | [libcurl](https://curl.se/libcurl/) |
+| JSON | [nlohmann/json](https://github.com/nlohmann/json) |
+| Anonymity | [Tor Expert Bundle](https://www.torproject.org/) |
+| Relay Servers | Flask + PyNaCl (Python) |
+
+## Quick Start
 
 ### Prerequisites
 
-You need `cmake` and `vcpkg` installed on Windows to build the project.
+- Windows 10/11 (x64)
+- [CMake](https://cmake.org/) ≥ 3.15
+- [vcpkg](https://vcpkg.io/) with the following packages installed for triplet `x64-windows-static`:
+  - `libsodium`, `liboqs`, `ftxui`, `curl`, `nlohmann-json`
 
-Dependencies managed via `vcpkg`:
-*   `libsodium`
-*   `liboqs`
-*   `ftxui`
-*   `curl`
-*   `nlohmann-json`
+### Build
 
-### Build Instructions
+```powershell
+# Configure
+cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/yourusername/shushhh.git
-    cd shushhh
-    ```
+# Build (Release)
+cmake --build build --config Release
+```
 
-2.  **Configure CMake:**
-    Make sure to point to your `vcpkg` toolchain.
-    ```powershell
-    cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
-    ```
+### Run
 
-3.  **Build the Project:**
-    ```powershell
-    cmake --build build --config Release
-    ```
+```powershell
+# Start relay servers (in separate terminals)
+cd relay
+python key_server.py
+python msg_server.py
 
-## 💾 Standalone USB Installer
+# Launch the messenger
+.\build\Release\shushhh.exe
+```
 
-`shushhh` comes with a custom installer that embeds the executable (and optionally Tor) directly into a single `shushhh_installer.exe`. 
+### Deploy to USB
 
-Run the installer, select a target USB drive from the TUI list, and it will safely deploy the hidden environment to the drive.
+The self-contained installer embeds `shushhh.exe` and `tor.exe` as Win32 resources. Place `tor/tor/tor.exe` in the project root before building, then:
 
-## 🕵️ Usage
+```powershell
+.\build\Release\shushhh_installer.exe
+```
 
-1.  Launch `shushhh.exe`.
-2.  **Register/Login**: Your keys are generated locally. The public keys are uploaded to the Key Server, while the private keys remain encrypted on your device.
-3.  **Setup**: Enter your peer's username to initiate a secure connection.
-4.  **Chat**: Messages are sent directly through the secure relay over Tor.
+Select a USB drive from the auto-detected list and click **INSTALL**.
 
-> **Note:** Press `Alt+X` inside the app to toggle the Debug Window and view background logs, cryptographic handshakes, and Tor status.
+## Documentation
 
-## 🛡️ Security Architecture
+For a complete, in-depth explanation of every algorithm, protocol, data structure, and message flow, see:
 
-*   **Authentication**: Password hashing is done via **Argon2**, and Key Server requests are signed with **Ed25519** signatures.
-*   **Identity**: Your identity file (`identity.dat`) is encrypted at rest using your password hash.
-*   **Anti-Forensics**: The watchdog ensures no decrypted data or temporary routing files remain on the host computer if the drive is unexpectedly disconnected.
+**[`PROJECT_BIBLE.md`](PROJECT_BIBLE.md)** — The definitive technical reference for the entire project.
 
----
-*Disclaimer: This is a proof-of-concept project. Use at your own risk.*
+## License
+
+MIT
