@@ -68,9 +68,17 @@ Every message is encrypted with **ChaCha20-Poly1305**, keys are established via 
 # Configure
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
+<<<<<<< HEAD
 # Build (Release)
 cmake --build build --config Release
 ```
+=======
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/AryaChavan838181/shushhh.git
+    cd shushhh
+    ```
+>>>>>>> 380e785d6fcbbe88ccc12740e83bea680e949a12
 
 ### Run
 
@@ -100,6 +108,11 @@ For a complete, in-depth explanation of every algorithm, protocol, data structur
 
 **[`PROJECT_BIBLE.md`](PROJECT_BIBLE.md)** — The definitive technical reference for the entire project.
 
+<<<<<<< HEAD
 ## License
 
 MIT
+=======
+---
+*Disclaimer: This is a proof-of-concept project. Use at your own risk.*
+>>>>>>> 380e785d6fcbbe88ccc12740e83bea680e949a12
