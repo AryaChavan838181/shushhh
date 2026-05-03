@@ -13,7 +13,7 @@
 
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Cross-Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-lightgrey.svg)]()
 
 </div>
 
@@ -39,81 +39,142 @@ Every message is encrypted with **ChaCha20-Poly1305**, keys are established via 
 | **Encrypted Identity File** | `identity.dat` encrypted with `SHA-256(password + username)` via ChaCha20-Poly1305 |
 | **Store-and-Forward Relay** | Cryptographically blind message server — sees only opaque blobs and hashed tags |
 | **TUI (Terminal UI)** | Full-screen FTXUI interface with debug overlay (`Alt+X`) |
-| **Cross-Platform** | Runs on Windows and Linux from the same codebase |
-| **Self-Contained Installer** | (Windows) Single `.exe` with `shushhh.exe`, `tor.exe`, and GeoIP data embedded as Win32 resources |
+| **Cross-Platform** | Runs on Windows, Linux, and Android |
+
+---
+
+## How to Use Shushhh
+
+### Step 1: Download
+
+Go to the [Releases](https://github.com/AryaChavan838181/shushhh/releases) page and download the correct package for your platform:
+
+| Platform | Download | Contents |
+|---|---|---|
+| **Windows** | `shushhh-windows.zip` | `shushhh.exe` + bundled Tor + GeoIP data |
+| **Linux** | `shushhh-linux.zip` | `shushhh` binary + bundled Tor |
+| **Android** | `shushhh.apk` | Standalone APK (no root required) |
+
+### Step 2: Extract (Windows / Linux)
+
+**Windows:**
+1. Extract `shushhh-windows.zip` to a USB pen drive (or any folder).
+2. You should see:
+   ```
+   E:\
+   ├── shushhh.exe
+   └── tor/
+       └── tor/
+           ├── tor.exe
+           ├── geoip
+           └── geoip6
+   ```
+
+**Linux:**
+1. Extract `shushhh-linux.zip` to a USB drive or any directory.
+2. Make the binary executable:
+   ```bash
+   chmod +x shushhh
+   ```
+3. Alternatively, install Tor system-wide (`sudo apt install tor`) and Shushhh will auto-detect it.
+
+### Step 3: Run
+
+**Windows:**
+```
+Double-click shushhh.exe
+```
+> Windows SmartScreen may show a warning because the exe is unsigned. Click **"More info"** → **"Run anyway"**.
+
+**Linux:**
+```bash
+./shushhh
+```
+
+**Android:**
+1. Install the APK (enable "Install from unknown sources" if prompted).
+2. Open the app.
+
+### Step 4: Create an Account
+
+1. On first launch, select **Register**.
+2. Choose a **username** and **password**.
+3. Shushhh generates your hybrid keypair (X25519 + ML-KEM-768) and uploads your public keys to the relay server over Tor.
+4. Your private keys are encrypted locally into `identity.dat` — never leaves your device.
+
+### Step 5: Start Chatting
+
+1. Select **Login** and enter your credentials.
+2. Enter the **username** of the person you want to talk to.
+3. Start sending messages. Every message is:
+   - Encrypted with a unique key (symmetric ratchet)
+   - Routed through Tor (anonymous)
+   - Delivered via a cryptographically blind relay (the server sees nothing)
+
+### Step 6: Unplug & Go (USB Watchdog)
+
+If running from a USB pen drive, simply **yank the drive out** when you're done. The watchdog will automatically:
+- Wipe the Shushhh binary from the host's temp directory
+- Destroy any session data
+- Leave zero forensic traces on the host machine
+
+---
 
 ## Technology Stack
 
 | Component | Library / Tool |
 |---|---|
 | Language | C++17, Python 3 (relay servers) |
-| Classical Crypto | [libsodium](https://doc.libsodium.org/) — X25519, ChaCha20-Poly1305, Ed25519, SHA-256, HMAC-SHA256, HKDF |
+| Classical Crypto | [libsodium](https://doc.libsodium.org/) — X25519, ChaCha20-Poly1305, Ed25519, SHA-256, HKDF |
 | Post-Quantum Crypto | [liboqs](https://openquantumsafe.org/) — ML-KEM-768 (Kyber) |
 | Terminal UI | [FTXUI](https://github.com/ArthurSonzogni/FTXUI) |
 | HTTP Client | [libcurl](https://curl.se/libcurl/) |
 | JSON | [nlohmann/json](https://github.com/nlohmann/json) |
-| Anonymity | [Tor Expert Bundle](https://www.torproject.org/) |
+| Anonymity | [Tor](https://www.torproject.org/) |
 | Relay Servers | Flask + PyNaCl (Python) |
 
-## Quick Start
+---
+
+## Building from Source
+
+<details>
+<summary><strong>Click to expand build instructions</strong></summary>
 
 ### Prerequisites
 
-**Windows:**
-- Windows 10/11 (x64)
 - [CMake](https://cmake.org/) ≥ 3.15
-- [vcpkg](https://vcpkg.io/) with packages: `libsodium`, `liboqs`, `ftxui`, `curl`, `nlohmann-json` (triplet `x64-windows-static`)
-
-**Linux (Ubuntu/Debian):**
-- `build-essential`, `cmake`, `g++`
 - [vcpkg](https://vcpkg.io/) with packages: `libsodium`, `liboqs`, `ftxui`, `curl`, `nlohmann-json`
-- Tor: `sudo apt install tor` or bundle a portable binary
 
-### Clone
-
-```bash
-git clone https://github.com/AryaChavan838181/shushhh.git
-cd shushhh
-```
-
-### Build (Windows)
+### Windows
 
 ```powershell
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static
 cmake --build build --config Release
 ```
 
-### Build (Linux)
+### Linux
 
 ```bash
+sudo apt install -y build-essential cmake g++ autoconf autoconf-archive automake libtool curl zip unzip tar
+git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+~/vcpkg/vcpkg install libsodium curl nlohmann-json ftxui liboqs
+
 cmake -B build-linux -S . -DCMAKE_TOOLCHAIN_FILE=~/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build build-linux
 ```
 
-### Run
+### Running the Relay Servers
 
 ```bash
-# Start relay servers (in separate terminals)
 cd relay
-python key_server.py
-python msg_server.py
-
-# Launch the messenger
-# Windows:
-.\build\Release\shushhh.exe
-# Linux:
-./build-linux/shushhh
+python key_server.py    # Terminal 1
+python msg_server.py    # Terminal 2
 ```
 
-### Deploy to USB (Windows)
+</details>
 
-The self-contained installer embeds `shushhh.exe`, `tor.exe`, and Tor GeoIP data as Win32 resources. Place the Tor Expert Bundle at `tor/` in the project root before building, then:
-
-```powershell
-.\build\Release\shushhh_installer.exe
-```
-
-Select a USB drive from the auto-detected list and click **INSTALL**.
+---
 
 ## Documentation
 
