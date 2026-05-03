@@ -1,0 +1,3 @@
+/mnt/c/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build-linux/CMakeFiles/shushhh.dir
+/mnt/c/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build-linux/CMakeFiles/edit_cache.dir
+/mnt/c/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build-linux/CMakeFiles/rebuild_cache.dir

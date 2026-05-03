@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# --- vcpkg static triplet ---
+# --- vcpkg static triplet (Windows only) ---
 if(WIN32)
     set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
     # Use static MSVC runtime to match static vcpkg libs
@@ -19,12 +19,20 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(liboqs CONFIG REQUIRED)
 find_package(ftxui CONFIG REQUIRED)
 
+# --- Platform-specific source files ---
+if(WIN32)
+    set(PLATFORM_SRC src/platform/platform_win32.cpp)
+else()
+    set(PLATFORM_SRC src/platform/platform_linux.cpp)
+endif()
+
 # --- Sources ---
 add_executable(shushhh
     Main.cpp
     src/crypto/crypto.cpp
     src/auth/auth.cpp
     src/watchdog/watchdog.cpp
+    ${PLATFORM_SRC}
 )
 
 target_include_directories(shushhh PRIVATE
@@ -42,44 +50,47 @@ target_link_libraries(shushhh PRIVATE
     ftxui::component
 )
 
-# --- Windows-specific: static link system libs ---
+# --- Platform-specific link libraries ---
 if(WIN32)
     target_link_libraries(shushhh PRIVATE ws2_32 crypt32 bcrypt)
-endif()
-
-# --- Standalone USB Installer (self-contained with embedded binaries) ---
-# Generate the .rc content with the path to the built shushhh.exe
-set(RC_CONTENT "#include \"resource_ids.h\"\nIDR_SHUSHHH_EXE RCDATA \"$<TARGET_FILE:shushhh>\"\n")
-# Check for tor.exe at configure time
-if(EXISTS "${CMAKE_SOURCE_DIR}/tor/tor/tor.exe")
-    string(APPEND RC_CONTENT "IDR_TOR_EXE RCDATA \"${CMAKE_SOURCE_DIR}/tor/tor/tor.exe\"\n")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tor/data/geoip")
-        string(APPEND RC_CONTENT "IDR_TOR_GEOIP RCDATA \"${CMAKE_SOURCE_DIR}/tor/data/geoip\"\n")
-    endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tor/data/geoip6")
-        string(APPEND RC_CONTENT "IDR_TOR_GEOIP6 RCDATA \"${CMAKE_SOURCE_DIR}/tor/data/geoip6\"\n")
-    endif()
-    message(STATUS "Tor (and data) found — will be embedded in installer")
 else()
-    message(STATUS "Tor NOT found at ${CMAKE_SOURCE_DIR}/tor/tor/tor.exe — installer will skip Tor")
+    find_package(Threads REQUIRED)
+    target_link_libraries(shushhh PRIVATE Threads::Threads)
 endif()
 
-file(GENERATE
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
-    CONTENT "${RC_CONTENT}"
-)
-
-add_executable(shushhh_installer
-    src/installer/Installer.cpp
-    "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
-)
-target_include_directories(shushhh_installer PRIVATE ${CMAKE_SOURCE_DIR}/src/installer)
-target_link_libraries(shushhh_installer PRIVATE
-    ftxui::screen
-    ftxui::dom
-    ftxui::component
-)
-add_dependencies(shushhh_installer shushhh)
+# --- Standalone USB Installer (Windows only) ---
 if(WIN32)
+    # Generate the .rc content with the path to the built shushhh.exe
+    set(RC_CONTENT "#include \"resource_ids.h\"\nIDR_SHUSHHH_EXE RCDATA \"$<TARGET_FILE:shushhh>\"\n")
+    # Check for tor.exe at configure time
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tor/tor/tor.exe")
+        string(APPEND RC_CONTENT "IDR_TOR_EXE RCDATA \"${CMAKE_SOURCE_DIR}/tor/tor/tor.exe\"\n")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/tor/data/geoip")
+            string(APPEND RC_CONTENT "IDR_TOR_GEOIP RCDATA \"${CMAKE_SOURCE_DIR}/tor/data/geoip\"\n")
+        endif()
+        if(EXISTS "${CMAKE_SOURCE_DIR}/tor/data/geoip6")
+            string(APPEND RC_CONTENT "IDR_TOR_GEOIP6 RCDATA \"${CMAKE_SOURCE_DIR}/tor/data/geoip6\"\n")
+        endif()
+        message(STATUS "Tor (and data) found — will be embedded in installer")
+    else()
+        message(STATUS "Tor NOT found at ${CMAKE_SOURCE_DIR}/tor/tor/tor.exe — installer will skip Tor")
+    endif()
+
+    file(GENERATE
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
+        CONTENT "${RC_CONTENT}"
+    )
+
+    add_executable(shushhh_installer
+        src/installer/Installer.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/installer_res_$<CONFIG>.rc"
+    )
+    target_include_directories(shushhh_installer PRIVATE ${CMAKE_SOURCE_DIR}/src/installer)
+    target_link_libraries(shushhh_installer PRIVATE
+        ftxui::screen
+        ftxui::dom
+        ftxui::component
+    )
+    add_dependencies(shushhh_installer shushhh)
     set_property(TARGET shushhh_installer PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()

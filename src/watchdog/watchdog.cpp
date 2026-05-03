@@ -1,17 +1,25 @@
 #include "watchdog/watchdog.h"
+#include "platform/platform.h"
 
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <chrono>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <windows.h>
-#include <shlobj.h>   // SHGetFolderPathA
+#include <shlobj.h>
 #else
-// Stub for non-Windows platforms — watchdog is Windows-specific
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 #endif
+
+namespace fs = std::filesystem;
 
 // ============================================================
 // F-11 · Watchdog auto-wipe implementation
@@ -19,27 +27,23 @@
 
 #ifdef _WIN32
 
-char detect_usb_drive() {
-    // Get the path of the currently running executable
+// ---- Windows Implementation ----
+
+std::string detect_usb_drive() {
     char exe_path[MAX_PATH];
     GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-
-    // Extract drive letter (first character of the path)
     char drive_letter = exe_path[0];
-    
-    // Verify it's a removable drive (USB pendrive)
+
     char root_path[] = { drive_letter, ':', '\\', '\0' };
     UINT drive_type = GetDriveTypeA(root_path);
 
     if (drive_type == DRIVE_REMOVABLE) {
         std::cerr << "[+] USB drive detected: " << drive_letter << ":\\\n";
-        return drive_letter;
+    } else {
+        std::cerr << "[*] Running from non-removable drive " << drive_letter
+                  << ":\\ — watchdog will monitor this drive\n";
     }
-
-    // If running from a fixed drive (during development), warn but continue
-    std::cerr << "[*] Running from non-removable drive " << drive_letter
-              << ":\\ — watchdog will monitor this drive\n";
-    return drive_letter;
+    return std::string(1, drive_letter);
 }
 
 bool write_wipe_script(const std::string& temp_dir) {
@@ -72,15 +76,12 @@ bool write_wipe_script(const std::string& temp_dir) {
     return true;
 }
 
-// Watchdog monitor thread function
-// Runs in a detached mode — polls for drive presence every 2 seconds
-static void watchdog_monitor(char drive_letter, std::string temp_dir) {
-    char root_path[] = { drive_letter, ':', '\\', '\0' };
-
+// Watchdog monitor thread — polls for drive presence every 2 seconds
+static void watchdog_monitor(std::string drive_str, std::string temp_dir) {
+    char drive_letter = drive_str[0];
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
 
-        // Check if the drive is still present
         DWORD drives = GetLogicalDrives();
         int drive_index = toupper(drive_letter) - 'A';
 
@@ -88,13 +89,12 @@ static void watchdog_monitor(char drive_letter, std::string temp_dir) {
             // Drive removed — execute wipe immediately
             std::string bat_path = temp_dir + "\\shushhh_wipe.bat";
 
-            // Launch the wipe bat as a detached process
             STARTUPINFOA si;
             PROCESS_INFORMATION pi;
             ZeroMemory(&si, sizeof(si));
             si.cb = sizeof(si);
             si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_HIDE;  // Hidden window
+            si.wShowWindow = SW_HIDE;
             ZeroMemory(&pi, sizeof(pi));
 
             std::string cmd = "cmd.exe /c \"" + bat_path + "\"";
@@ -114,63 +114,136 @@ static void watchdog_monitor(char drive_letter, std::string temp_dir) {
             if (pi.hProcess) CloseHandle(pi.hProcess);
             if (pi.hThread) CloseHandle(pi.hThread);
 
-            // Our job is done — exit the watchdog thread
             return;
         }
     }
 }
 
-bool launch_watchdog(char drive_letter) {
-    // Get %TEMP% directory
-    char temp_path[MAX_PATH];
-    if (GetTempPathA(MAX_PATH, temp_path) == 0) {
-        std::cerr << "[-] Failed to get TEMP directory\n";
-        return false;
-    }
-    std::string temp_dir(temp_path);
-    // Remove trailing backslash if present
-    if (!temp_dir.empty() && temp_dir.back() == '\\') {
-        temp_dir.pop_back();
-    }
+bool launch_watchdog(const std::string& drive_or_mount) {
+    std::string temp_dir = platform_get_temp_dir();
 
-    // Write the wipe script
     if (!write_wipe_script(temp_dir)) {
         return false;
     }
 
-    // Launch the watchdog as a detached background thread
-    // This thread survives even if the main menu loop exits normally,
-    // because we detach it. If shushhh.exe is killed, the thread dies too —
-    // for true process-level survival, a separate watchdog.exe would be needed.
-    // For the Phase 1 implementation, thread-based is sufficient.
-    std::thread monitor(watchdog_monitor, drive_letter, temp_dir);
+    std::thread monitor(watchdog_monitor, drive_or_mount, temp_dir);
     monitor.detach();
 
     std::cerr << "[+] Watchdog launched — monitoring drive "
-              << drive_letter << ":\\\n";
+              << drive_or_mount << ":\\\n";
     std::cerr << "    Wipe script at: " << temp_dir << "\\shushhh_wipe.bat\n";
 
     return true;
 }
 
 #else
-// ============================================================
-// Non-Windows stubs
-// ============================================================
 
-char detect_usb_drive() {
-    std::cerr << "[-] Watchdog is only supported on Windows\n";
-    return '\0';
+// ---- Linux Implementation ----
+
+// Detect the mount point of the USB device the executable is running from.
+// Reads /proc/mounts to find which mount point contains the exe path.
+// Returns empty string if not running from a removable/external mount.
+std::string detect_usb_drive() {
+    std::string exe_dir = platform_get_exe_dir();
+
+    // Check if running from typical removable mount points
+    // Linux auto-mounts USB to /media/<user>/<label> or /run/media/<user>/<label>
+    if (exe_dir.find("/media/") == 0 || exe_dir.find("/run/media/") == 0) {
+        // Extract the mount root (e.g., /media/user/USBDRIVE)
+        // Count path segments: /media/<user>/<label>
+        size_t count = 0;
+        size_t pos = 0;
+        std::string mount_root;
+        for (size_t i = 1; i < exe_dir.size(); ++i) {
+            if (exe_dir[i] == '/') {
+                count++;
+                if ((exe_dir.find("/media/") == 0 && count == 3) ||
+                    (exe_dir.find("/run/media/") == 0 && count == 4)) {
+                    mount_root = exe_dir.substr(0, i);
+                    break;
+                }
+            }
+        }
+        if (mount_root.empty()) mount_root = exe_dir;
+        std::cerr << "[+] USB mount detected: " << mount_root << "\n";
+        return mount_root;
+    }
+
+    // Not on a removable mount — return the exe dir anyway for development
+    std::cerr << "[*] Running from " << exe_dir
+              << " — watchdog will monitor this path\n";
+    return exe_dir;
 }
 
-bool write_wipe_script(const std::string& /*temp_dir*/) {
-    std::cerr << "[-] Watchdog is only supported on Windows\n";
-    return false;
+bool write_wipe_script(const std::string& temp_dir) {
+    std::string sh_path = temp_dir + "/shushhh_wipe.sh";
+    std::ofstream sh(sh_path);
+
+    if (!sh.is_open()) {
+        std::cerr << "[-] Failed to create wipe script at " << sh_path << "\n";
+        return false;
+    }
+
+    sh << "#!/bin/bash\n";
+    sh << "echo '[*] shushhh watchdog: USB disconnected — initiating wipe'\n";
+    sh << "\n";
+    sh << "# Delete all shushhh-related temporary files\n";
+    sh << "rm -rf /tmp/shushhh_* 2>/dev/null\n";
+    sh << "rm -rf \"${XDG_RUNTIME_DIR}/shushhh_*\" 2>/dev/null\n";
+    sh << "\n";
+    sh << "# Overwrite freed disk space (if shred is available)\n";
+    sh << "if command -v shred &>/dev/null; then\n";
+    sh << "    find /tmp -maxdepth 1 -name 'shushhh_*' -exec shred -u {} \\; 2>/dev/null\n";
+    sh << "fi\n";
+    sh << "\n";
+    sh << "# Self-delete\n";
+    sh << "rm -f \"$0\" 2>/dev/null\n";
+
+    sh.close();
+
+    // Make script executable
+    chmod(sh_path.c_str(), 0700);
+
+    return true;
 }
 
-bool launch_watchdog(char /*drive_letter*/) {
-    std::cerr << "[-] Watchdog is only supported on Windows\n";
-    return false;
+// Watchdog monitor thread — polls for mount point presence every 2 seconds
+static void watchdog_monitor_linux(std::string mount_path, std::string temp_dir) {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        // Check if mount point still exists and is accessible
+        struct stat st;
+        if (stat(mount_path.c_str(), &st) != 0) {
+            // Mount point gone — USB yanked
+            std::string sh_path = temp_dir + "/shushhh_wipe.sh";
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                // Child: run wipe script
+                setsid();
+                execl("/bin/bash", "bash", sh_path.c_str(), (char*)nullptr);
+                _exit(127);
+            }
+            return;
+        }
+    }
+}
+
+bool launch_watchdog(const std::string& drive_or_mount) {
+    std::string temp_dir = platform_get_temp_dir();
+
+    if (!write_wipe_script(temp_dir)) {
+        return false;
+    }
+
+    std::thread monitor(watchdog_monitor_linux, drive_or_mount, temp_dir);
+    monitor.detach();
+
+    std::cerr << "[+] Watchdog launched — monitoring " << drive_or_mount << "\n";
+    std::cerr << "    Wipe script at: " << temp_dir << "/shushhh_wipe.sh\n";
+
+    return true;
 }
 
 #endif

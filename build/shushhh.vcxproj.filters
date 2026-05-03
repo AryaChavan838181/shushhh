@@ -13,6 +13,9 @@
     <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\watchdog\watchdog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\platform\platform_win32.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\CMakeLists.txt" />

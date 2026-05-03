@@ -389,6 +389,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\crypto\crypto.cpp" />
     <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\auth\auth.cpp" />
     <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\watchdog\watchdog.cpp" />
+    <ClCompile Include="C:\Users\Arya\Documents\College\SEM_4\DS_II\FinalHopefully\shushhh\src\platform\platform_win32.cpp" />
     <Natvis Include="C:\vcpkg\installed\x64-windows-static\share\nlohmann_json\nlohmann_json.natvis">
     </Natvis>
   </ItemGroup>
