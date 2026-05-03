@@ -1,4 +1,0 @@
-C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/CMakeFiles/shushhh.dir
-C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/CMakeFiles/shushhh_installer.dir
-C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/CMakeFiles/ZERO_CHECK.dir

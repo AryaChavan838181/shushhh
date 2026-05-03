@@ -5,13 +5,6 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
-#ifdef __ANDROID__
-#include <android/log.h>
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "shushhh_auth", __VA_ARGS__)
-#else
-#define LOGE(...) fprintf(stderr, __VA_ARGS__)
-#endif
-
 #include <iostream>
 #include <cstring>
 #include <fstream>
@@ -22,6 +15,13 @@
 #else
 #include <termios.h>
 #include <unistd.h>
+#endif
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "shushhh_auth", __VA_ARGS__)
+#else
+#define LOGE(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
 using json = nlohmann::json;
@@ -66,16 +66,18 @@ std::string tor_post(const std::string& url, const std::string& json_payload) {
 
     std::string response;
 
-    // Only route through Tor if it's an onion service
-    if (url.find(".onion") != std::string::npos) {
-        curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
-    }
+    // Route ALL traffic through Tor for anonymity
+    curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
     
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+    // Disable SSL verification for Android (native curl lacks CA bundle)
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -86,7 +88,7 @@ std::string tor_post(const std::string& url, const std::string& json_payload) {
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        std::cerr << "[-] Tor POST failed: " << curl_easy_strerror(res) << "\n";
+        LOGE("[-] Tor POST failed: %s\n", curl_easy_strerror(res));
         return "";
     }
 
@@ -102,21 +104,23 @@ std::string tor_get(const std::string& url) {
 
     std::string response;
 
-    // Only route through Tor if it's an onion service
-    if (url.find(".onion") != std::string::npos) {
-        curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
-    }
+    // Route ALL traffic through Tor for anonymity
+    curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
 
+    // Disable SSL verification for Android (native curl lacks CA bundle)
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        std::cerr << "[-] Tor GET failed: " << curl_easy_strerror(res) << "\n";
+        LOGE("[-] Tor GET failed: %s\n", curl_easy_strerror(res));
         return "";
     }
 
@@ -218,7 +222,7 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
 
     std::string response = tor_post(url, auth_payload.dump());
     if (response.empty()) {
-        // std::cerr << "[-] Authentication failed — no response from server\n";
+        LOGE("[-] Authentication failed — no response from server\n");
         return false;
     }
 
@@ -227,8 +231,8 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
         json resp = json::parse(response);
 
         if (!resp.contains("status") || resp["status"] != "ok") {
-            // std::cerr << "[-] Authentication failed: "
-            //           << resp.value("message", "unknown error") << "\n";
+            LOGE("[-] Authentication failed: %s (Raw response: %s)\n",
+                 resp.value("message", "unknown error").c_str(), response.c_str());
             return false;
         }
 
@@ -244,7 +248,7 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
                                   sig_b64.c_str(), sig_b64.size(),
                                   nullptr, &sig_len, nullptr,
                                   sodium_base64_VARIANT_ORIGINAL) != 0) {
-                // std::cerr << "[-] Failed to decode server signature\n";
+                LOGE("[-] Failed to decode server signature\n");
                 return false;
             }
             sig.resize(sig_len);
@@ -258,8 +262,8 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
             );
 
             if (!valid) {
-                // std::cerr << "[-] CRITICAL: Server signature verification FAILED\n";
-                // std::cerr << "    Possible MITM attack — aborting authentication\n";
+                LOGE("[-] CRITICAL: Server signature verification FAILED\n");
+                LOGE("    Possible MITM attack — aborting authentication\n");
                 return false;
             }
             // std::cout << "[+] Server Ed25519 signature verified\n";
@@ -273,7 +277,8 @@ bool PasswordLogin::authenticate(const std::string& server_url) {
         return true;
 
     } catch (const json::exception& e) {
-        // std::cerr << "[-] Failed to parse auth response: " << e.what() << "\n";
+        LOGE("[-] Failed to parse auth response: %s\n", e.what());
+        LOGE("    Raw response was: %s\n", response.c_str());
         return false;
     }
 }

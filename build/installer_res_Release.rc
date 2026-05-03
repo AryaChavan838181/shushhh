@@ -1,5 +1,0 @@
-#include "resource_ids.h"
-IDR_SHUSHHH_EXE RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/build/Release/shushhh.exe"
-IDR_TOR_EXE RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/tor/tor/tor.exe"
-IDR_TOR_GEOIP RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/tor/data/geoip"
-IDR_TOR_GEOIP6 RCDATA "C:/Users/Arya/Documents/College/SEM_4/DS_II/FinalHopefully/shushhh/tor/data/geoip6"

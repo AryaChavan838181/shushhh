@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0A0A0F">
+    <title>shushhh</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 0: BOOT / SPLASH            -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-boot" class="screen active">
+        <div class="boot-container">
+            <pre class="ascii-logo" id="ascii-logo">
+███████╗██╗  ██╗██╗   ██╗███████╗██╗  ██╗██╗  ██╗██╗  ██╗
+██╔════╝██║  ██║██║   ██║██╔════╝██║  ██║██║  ██║██║  ██║
+███████╗███████║██║   ██║███████╗███████║███████║███████║
+╚════██║██╔══██║██║   ██║╚════██║██╔══██║██╔══██║██╔══██║
+███████║██║  ██║╚██████╔╝███████║██║  ██║██║  ██║██║  ██║
+╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝</pre>
+            <p class="boot-subtitle">Quantum-Safe Encrypted Messenger</p>
+            <div class="boot-status">
+                <div class="spinner"></div>
+                <p id="boot-status-text">Initializing crypto engine...</p>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="boot-progress"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 1: MAIN MENU                -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-menu" class="screen">
+        <div class="menu-container">
+            <pre class="ascii-logo-small">
+ ███████╗██╗  ██╗██╗   ██╗███████╗██╗  ██╗██╗  ██╗██╗  ██╗
+ ██╔════╝██║  ██║██║   ██║██╔════╝██║  ██║██║  ██║██║  ██║
+ ███████╗███████║██║   ██║███████╗███████║███████║███████║
+ ╚════██║██╔══██║██║   ██║╚════██║██╔══██║██╔══██║██╔══██║
+ ███████║██║  ██║╚██████╔╝███████║██║  ██║██║  ██║██║  ██║
+ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝</pre>
+            <p class="menu-subtitle">Quantum-Safe · Anonymous · Portable</p>
+
+            <div class="status-indicators">
+                <div class="indicator" id="tor-indicator">
+                    <span class="dot dot-red"></span>
+                    <span>Tor</span>
+                </div>
+                <div class="indicator" id="usb-indicator">
+                    <span class="dot dot-green"></span>
+                    <span>USB</span>
+                </div>
+            </div>
+
+            <div class="menu-buttons">
+                <button class="btn btn-primary" onclick="showScreen('screen-login')">
+                    <span class="btn-icon">🔐</span>
+                    LOGIN
+                </button>
+                <button class="btn btn-secondary" onclick="showScreen('screen-register')">
+                    <span class="btn-icon">📝</span>
+                    REGISTER
+                </button>
+                <button class="btn btn-ghost" onclick="showScreen('screen-config')">
+                    <span class="btn-icon">⚙️</span>
+                    CONFIGURE
+                </button>
+            </div>
+
+            <p class="version-tag">shushhh v2.0 · android</p>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 2: LOGIN                    -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-login" class="screen">
+        <div class="form-container">
+            <div class="form-header">
+                <button class="btn-back" onclick="showScreen('screen-menu')">←</button>
+                <h2>Login</h2>
+            </div>
+            <div class="glass-card">
+                <div class="input-group">
+                    <label for="login-user">Username</label>
+                    <input type="text" id="login-user" placeholder="Enter username" autocomplete="off" autocapitalize="off">
+                </div>
+                <div class="input-group">
+                    <label for="login-pass">Password</label>
+                    <input type="password" id="login-pass" placeholder="Enter password">
+                </div>
+                <div id="login-error" class="error-text"></div>
+                <button class="btn btn-primary btn-full" id="btn-login" onclick="doLogin()">
+                    AUTHENTICATE
+                </button>
+                <div class="loading-overlay" id="login-loading">
+                    <div class="spinner"></div>
+                    <span>Authenticating via Tor...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 3: REGISTER                 -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-register" class="screen">
+        <div class="form-container">
+            <div class="form-header">
+                <button class="btn-back" onclick="showScreen('screen-menu')">←</button>
+                <h2>Register</h2>
+            </div>
+            <div class="glass-card">
+                <div class="input-group">
+                    <label for="reg-user">Username</label>
+                    <input type="text" id="reg-user" placeholder="Choose a username" autocomplete="off" autocapitalize="off">
+                </div>
+                <div class="input-group">
+                    <label for="reg-pass">Password</label>
+                    <input type="password" id="reg-pass" placeholder="Choose a password">
+                </div>
+                <div class="input-group">
+                    <label for="reg-pass2">Confirm Password</label>
+                    <input type="password" id="reg-pass2" placeholder="Confirm password">
+                </div>
+                <div id="reg-error" class="error-text"></div>
+                <button class="btn btn-primary btn-full" onclick="doRegister()">
+                    CREATE ACCOUNT
+                </button>
+                <div class="loading-overlay" id="reg-loading">
+                    <div class="spinner"></div>
+                    <span>Registering via Tor...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 4: CONFIGURATION            -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-config" class="screen">
+        <div class="form-container">
+            <div class="form-header">
+                <button class="btn-back" onclick="showScreen('screen-menu')">←</button>
+                <h2>Configuration</h2>
+            </div>
+            <div class="glass-card">
+                <div class="input-group">
+                    <label for="cfg-ks">Key Server URL</label>
+                    <input type="url" id="cfg-ks" value="http://127.0.0.1:5000" autocapitalize="off">
+                </div>
+                <div class="input-group">
+                    <label for="cfg-ms">Message Server URL</label>
+                    <input type="url" id="cfg-ms" value="http://127.0.0.1:5001" autocapitalize="off">
+                </div>
+                <button class="btn btn-primary btn-full" onclick="saveConfig()">
+                    SAVE & BACK
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 5: PEER CONNECT             -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-connect" class="screen">
+        <div class="form-container">
+            <div class="form-header">
+                <h2>Secure Routing</h2>
+            </div>
+            <div class="glass-card">
+                <p class="card-hint">Enter the username of the person you want to message</p>
+                <div class="input-group">
+                    <label for="peer-user">Peer Username</label>
+                    <input type="text" id="peer-user" placeholder="target_username" autocomplete="off" autocapitalize="off">
+                </div>
+                <div id="connect-error" class="error-text"></div>
+                <button class="btn btn-primary btn-full" onclick="doConnect()">
+                    🔗 CONNECT
+                </button>
+                <div class="divider">
+                    <span>OR</span>
+                </div>
+                <button class="btn btn-secondary btn-full" onclick="doWait()">
+                    📡 WAIT FOR MESSAGES
+                </button>
+                <div class="loading-overlay" id="connect-loading">
+                    <div class="spinner"></div>
+                    <span>Establishing secure session...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ -->
+    <!-- SCREEN 6: CHAT                     -->
+    <!-- ═══════════════════════════════════ -->
+    <div id="screen-chat" class="screen">
+        <div class="chat-container">
+            <!-- Chat Header -->
+            <div class="chat-header">
+                <div class="chat-header-left">
+                    <span class="secure-badge">🔒 SECURE</span>
+                    <span class="chat-username" id="chat-my-name">you</span>
+                </div>
+                <div class="chat-header-right">
+                    <span class="chat-arrow">⟷</span>
+                    <span class="chat-peer" id="chat-peer-name">peer</span>
+                    <span class="dot dot-small" id="chat-tor-dot"></span>
+                </div>
+            </div>
+
+            <!-- Messages Area -->
+            <div class="chat-messages" id="chat-messages">
+                <div class="chat-empty">
+                    <p>🔐 End-to-end encrypted</p>
+                    <p class="hint">Messages are routed through Tor</p>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Type a message..."
+                       autocomplete="off" onkeydown="if(event.key==='Enter')sendMessage()">
+                <button class="btn-send" onclick="sendMessage()">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="currentColor"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
