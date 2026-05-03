@@ -95,14 +95,25 @@ Double-click shushhh.exe
 1. Install the APK (enable "Install from unknown sources" if prompted).
 2. Open the app.
 
-### Step 4: Create an Account
+### Step 4: Configure Server URLs
+
+> **⚠️ Important:** Shushhh defaults to `http://127.0.0.1:5000` (Key Server) and `http://127.0.0.1:5001` (Message Server). If the relay is hosted remotely (e.g., on a Raspberry Pi, a VPS, or a Tor hidden service), you **must** update these URLs before logging in.
+
+1. On the main menu, select **SET CONFIG**.
+2. Enter the **Key Server URL** (e.g., `https://your-relay.example.com:5000` or `http://xyz...onion:5000`).
+3. Enter the **Message Server URL** (e.g., `https://your-relay.example.com:5001` or `http://xyz...onion:5001`).
+4. Click **SAVE & BACK**.
+
+If you're running the relay servers locally for testing, the defaults will work out of the box.
+
+### Step 5: Create an Account
 
 1. On first launch, select **Register**.
 2. Choose a **username** and **password**.
 3. Shushhh generates your hybrid keypair (X25519 + ML-KEM-768) and uploads your public keys to the relay server over Tor.
 4. Your private keys are encrypted locally into `identity.dat` — never leaves your device.
 
-### Step 5: Start Chatting
+### Step 6: Start Chatting
 
 1. Select **Login** and enter your credentials.
 2. Enter the **username** of the person you want to talk to.
@@ -111,7 +122,7 @@ Double-click shushhh.exe
    - Routed through Tor (anonymous)
    - Delivered via a cryptographically blind relay (the server sees nothing)
 
-### Step 6: Unplug & Go (USB Watchdog)
+### Step 7: Unplug & Go (USB Watchdog)
 
 If running from a USB pen drive, simply **yank the drive out** when you're done. The watchdog will automatically:
 - Wipe the Shushhh binary from the host's temp directory
